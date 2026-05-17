@@ -28,3 +28,7 @@
 build/
 
 vivado/**/imports/
+
+vivado/**/*.xpr
+
+*.vcd
