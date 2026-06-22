@@ -21,32 +21,24 @@ RTL_DIR  = rtl
 TB_DIR   = tb
 BUILD_DIR = build
 
-TB ?= array
+TB ?= pe  # Default testbench if none specified
 
-TB_FILES := $(wildcard $(TB_DIR)/*_tb.sv)
-ALL_TBS  := $(patsubst $(TB_DIR)/%_tb.sv,%,$(TB_FILES))
+TB_FILES := $(wildcard $(TB_DIR)/tb_*.sv)
+ALL_TBS  := $(patsubst $(TB_DIR)/tb_%.sv,%,$(TB_FILES))
 
 
-ifeq ($(TB),pe)
-TB_TOP := $(TB_DIR)/pe_tb.sv
-GTKW_SAVE := $(BUILD_DIR)/pe.gtkw
-WAVEFILE := $(BUILD_DIR)/pe_wave.vcd
-else ifeq ($(TB),systolic_array)
-TB_TOP := $(TB_DIR)/systolic_array_tb.sv
-GTKW_SAVE := $(BUILD_DIR)/systolic_array.gtkw
-WAVEFILE := $(BUILD_DIR)/systolic_array_wave.vcd
-else ifeq ($(TB),conv)
-TB_TOP := $(TB_DIR)/tb_conv_engine.sv
-GTKW_SAVE := $(BUILD_DIR)/conv.gtkw
-WAVEFILE := $(BUILD_DIR)/conv_engine_wave.vcd
-else ifeq ($(TB),axilite)
-TB_TOP := $(TB_DIR)/tb_axi4_lite_slave.sv
-GTKW_SAVE := $(BUILD_DIR)/axilite.gtkw
-WAVEFILE := $(BUILD_DIR)/axi4_lite_slave_wave.vcd
+# Assumes: pe_tb.sv, systolic_array_tb.sv, conv_tb.sv, axilite_tb.sv
+# Assumes VCDs are named: build/pe.vcd, build/conv.vcd, etc.
+
+# If the file exists in the tb directory, use the pattern. Otherwise, treat TB as a custom path.
+ifneq ($(wildcard $(TB_DIR)/tb_$(TB).sv),)
+    TB_TOP    := $(TB_DIR)/tb_$(TB).sv
+    GTKW_SAVE := $(BUILD_DIR)/$(TB).gtkw
+    WAVEFILE  := $(BUILD_DIR)/$(TB).vcd
 else
-TB_TOP := $(TB)
-GTKW_SAVE := $(BUILD_DIR)/waves.gtkw
-WAVEFILE := $(BUILD_DIR)/waves.vcd
+    TB_TOP    := $(TB)
+    GTKW_SAVE := $(BUILD_DIR)/waves.gtkw
+    WAVEFILE  := $(BUILD_DIR)/waves.vcd
 endif
 
 SIMOUT := $(BUILD_DIR)/sim.vvp
@@ -70,7 +62,7 @@ sim: dirs
 
 test:
 	@if [ -z "$(ALL_TBS)" ]; then \
-		echo "Error: No testbenches matching '*_tb.sv' found in $(TB_DIR)/"; \
+		echo "Error: No testbenches matching 'tb_*.sv' found in $(TB_DIR)/"; \
 		exit 1; \
 	fi; \
 	set -e; \
