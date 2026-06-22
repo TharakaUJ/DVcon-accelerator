@@ -35,6 +35,14 @@ else ifeq ($(TB),systolic_array)
 TB_TOP := $(TB_DIR)/systolic_array_tb.sv
 GTKW_SAVE := $(BUILD_DIR)/systolic_array.gtkw
 WAVEFILE := $(BUILD_DIR)/systolic_array_wave.vcd
+else ifeq ($(TB),conv)
+TB_TOP := $(TB_DIR)/tb_conv_engine.sv
+GTKW_SAVE := $(BUILD_DIR)/conv.gtkw
+WAVEFILE := $(BUILD_DIR)/conv_engine_wave.vcd
+else ifeq ($(TB),axilite)
+TB_TOP := $(TB_DIR)/tb_axi4_lite_slave.sv
+GTKW_SAVE := $(BUILD_DIR)/axilite.gtkw
+WAVEFILE := $(BUILD_DIR)/axi4_lite_slave_wave.vcd
 else
 TB_TOP := $(TB)
 GTKW_SAVE := $(BUILD_DIR)/waves.gtkw
