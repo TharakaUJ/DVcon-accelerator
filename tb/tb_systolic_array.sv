@@ -1,5 +1,5 @@
 // =============================================================================
-// tb_systolic_array_4x4.v  —  Testbench for systolic_array_4x4
+// tb_systolic_array.v  —  Testbench for systolic_array
 // =============================================================================
 //
 //  The 4×4 array computes ONE vector-matrix product per invocation:
@@ -22,7 +22,7 @@
 
 `timescale 1ns/1ps
 
-module tb_systolic_array_4x4;
+module tb_systolic_array;
 
     // =========================================================================
     // Parameters (mirror DUT)
@@ -106,7 +106,7 @@ module tb_systolic_array_4x4;
     // =========================================================================
     // DUT
     // =========================================================================
-    systolic_array_4x4 #(
+    systolic_array #(
         .ROWS(ROWS),.COLS(COLS),
         .FRAC_BITS(0),.ACCUM_WIDTH(ACCUM_WIDTH),
         .SATURATE(1),.ROUND_POLICY(1),.PIPELINE_TYPE(0)
@@ -239,8 +239,8 @@ module tb_systolic_array_4x4;
     integer r_i, c_i;
 
     initial begin
-        $dumpfile("tb_systolic_array_4x4.vcd");
-        $dumpvars(0, tb_systolic_array_4x4);
+        $dumpfile("tb_systolic_array.vcd");
+        $dumpvars(0, tb_systolic_array);
 
         // ------------------------------------------------------------------ //
         // Suite 1 — Identity weights: result_out[c] = act_in[c]             //

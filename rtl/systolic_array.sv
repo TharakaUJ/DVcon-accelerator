@@ -1,5 +1,5 @@
 // =============================================================================
-// systolic_array_4x4.v  —  4×4 Weight-Stationary Systolic Array
+// systolic_array.v  —  Weight-Stationary Systolic Array
 // =============================================================================
 //
 //  Computes a vector-matrix product each invocation:
@@ -60,9 +60,9 @@
 
 `timescale 1ns/1ps
 
-module systolic_array_4x4 #(
-    parameter integer ROWS          = 4,
-    parameter integer COLS          = 4,
+module systolic_array #(
+    parameter integer ROWS          = 16,
+    parameter integer COLS          = 16,
     parameter integer FRAC_BITS     = 0,
     parameter integer ACCUM_WIDTH   = 32,
     parameter integer SATURATE      = 1,
