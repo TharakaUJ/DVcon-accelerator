@@ -106,7 +106,7 @@ module tb_shift_reg_buffer;
         end
 
         set_buffer_in(0);
-        @(posedge clk); #1; check_int("Propagate T4", buffer_out[0], 69);  
+        @(posedge clk); #1; check_int("Propagate T4", buffer_out[0], 42);  
 
         // --- TEST 4: Continuous Streaming Data ---
         $display("--- Starting Test 4: Continuous Stream ---");
