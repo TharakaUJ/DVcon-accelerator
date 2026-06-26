@@ -1,36 +1,82 @@
 `timescale 1ns/1ps
 
 module shift_reg_buffer #(
-    parameter integer BUFFER_WIDTH = 32,
-    parameter integer BUFFER_DEPTH = 32
+    parameter int DATA_WIDTH = 8,
+    parameter int BUFFER_WIDTH = 32,
+    parameter int BUFFER_DEPTH = 32,
+    parameter bit EXPOSE_INTERNAL_WIRES = 0
 )(
-    input  wire                          clk,
-    input  wire                          rst_n,
-    input  wire                          en,
+    input  logic                          clk,
+    input  logic                          rst_n,
+    input  logic                          en,
 
-    input  wire signed [BUFFER_WIDTH-1:0] buffer_in,
-    output wire signed [BUFFER_WIDTH-1:0] buffer_out
+    input  logic signed [DATA_WIDTH-1:0] buffer_in [0:BUFFER_WIDTH-1],
+    output logic signed [DATA_WIDTH-1:0] buffer_out [0:BUFFER_WIDTH-1],
+    
+    output logic signed [DATA_WIDTH-1:0] connect_wires_out [0:(BUFFER_WIDTH*BUFFER_DEPTH)-1]
 );
 
-    wire signed [BUFFER_WIDTH-1:0] connect_wires [0:BUFFER_DEPTH];
-
-    assign connect_wires[0] = buffer_in;
-    assign buffer_out       = connect_wires[BUFFER_DEPTH];
+    logic signed [DATA_WIDTH-1:0] connect_wires [0:BUFFER_DEPTH][0:BUFFER_WIDTH-1];
 
     generate
-        genvar i;
-        for (i = 0; i < BUFFER_DEPTH; i = i + 1) 
+        genvar w_in;
+        for(w_in = 0; w_in < BUFFER_WIDTH; w_in = w_in + 1) begin : wire_init
+            assign connect_wires[0][w_in] = buffer_in[w_in];
+        end
+    endgenerate
+
+
+    generate
+        genvar stage, w;
+        for (stage = 0; stage < BUFFER_DEPTH; stage = stage + 1) 
         begin : buffer_gen
+            // 1. Declare local 1D arrays inside the named generate block
+            logic signed [DATA_WIDTH-1:0] inst_in  [0:BUFFER_WIDTH-1];
+            logic signed [DATA_WIDTH-1:0] inst_out [0:BUFFER_WIDTH-1];
+            
+            // 2. Map the 2D array elements to the local 1D arrays
+            for (w = 0; w < BUFFER_WIDTH; w = w + 1) begin : connection_loop
+                assign inst_in[w] = connect_wires[stage][w];
+                assign connect_wires[stage+1][w] = inst_out[w];
+            end
+
+            // 3. Pass the clean 1D arrays to the module
             buffer_reg #(
+                .DATA_WIDTH(DATA_WIDTH),
                 .BUFFER_WIDTH(BUFFER_WIDTH)
             ) buffer_inst (
                 .clk(clk),
                 .rst_n(rst_n),
                 .en(en),
-                .buffer_in(connect_wires[i]),
-                .buffer_out(connect_wires[i+1])
+                .buffer_in(inst_in),
+                .buffer_out(inst_out)
             );
         end        
+    endgenerate
+
+    generate
+        genvar w_out;
+        for(w_out = 0; w_out < BUFFER_WIDTH; w_out = w_out + 1) begin : wire_out
+            assign buffer_out[w_out] = connect_wires[BUFFER_DEPTH][w_out];
+        end
+    endgenerate
+
+    generate
+        if (EXPOSE_INTERNAL_WIRES) begin : gen_expose
+            always_comb begin
+                for (int d = 0; d < BUFFER_DEPTH; d = d + 1) begin
+                    for (int w = 0; w < BUFFER_WIDTH; w = w + 1) begin
+                        connect_wires_out[(d * BUFFER_WIDTH) + w] = connect_wires[d+1][w];
+                    end
+                end
+            end
+        end else begin : gen_hide
+            always_comb begin
+                for (int i = 0; i < BUFFER_DEPTH * BUFFER_WIDTH; i = i + 1) begin
+                    connect_wires_out[i] = '0;
+                end
+            end
+        end
     endgenerate
 
 endmodule

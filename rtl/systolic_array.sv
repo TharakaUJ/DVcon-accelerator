@@ -37,24 +37,13 @@
 //   result_out[c] appears ROWS+c cycles after the en pulse
 //   Last output (c=COLS-1) appears ROWS+COLS-1 = 7 cycles after en
 //
-//  Cycle counter
-//  -------------
-//   perf_cycles counts from first en to last column's out_valid.
-//
-//  Winograd extensibility
-//  -----------------------
-//   PIPELINE_TYPE=0: direct MAC (this module)
-//   PIPELINE_TYPE=1: Winograd (future wrapper)
-//   xform_* ports are stubs; xform_out = result_out when PIPELINE_TYPE=0.
-//
 //  Parameters
 //  ----------
-//   ROWS, COLS        grid dimensions (default 4×4)
+//   ROWS, COLS        grid dimensions (default 16×16)
 //   FRAC_BITS         fractional bits passed to each systolic_pe
 //   ACCUM_WIDTH       psum / output width
 //   SATURATE          saturation enable
 //   ROUND_POLICY      0=floor, 1=round-half-up
-//   PIPELINE_TYPE     0=direct, 1=Winograd stub (future)
 //
 // =============================================================================
 
@@ -66,8 +55,7 @@ module systolic_array #(
     parameter integer FRAC_BITS     = 0,
     parameter integer ACCUM_WIDTH   = 32,
     parameter integer SATURATE      = 1,
-    parameter integer ROUND_POLICY  = 1,
-    parameter integer PIPELINE_TYPE = 0
+    parameter integer ROUND_POLICY  = 1
 )(
     input  wire clk,
     input  wire rst_n,
@@ -89,34 +77,13 @@ module systolic_array #(
 
     // ── Performance counter ───────────────────────────────────────────────────
     output reg  [31:0] perf_cycles,
-    output reg         perf_valid,
-
-    // ── Winograd extension stubs ─────────────────────────────────────────────
-    input  wire signed [7:0]             xform_act_in [0:ROWS-1],
-    input  wire signed [7:0]             xform_wt_in  [0:ROWS*COLS-1],
-    output wire signed [ACCUM_WIDTH-1:0] xform_out    [0:COLS-1]
+    output reg         perf_valid
 );
 
     // =========================================================================
     // Parameters & local constants
     // =========================================================================
-    localparam integer DIAG_DEPTH = ROWS + COLS - 2;  // 6 for 4×4
-
-    // =========================================================================
-    // Input mux — direct vs Winograd
-    // =========================================================================
-    wire signed [7:0] eff_act [0:ROWS-1];
-    wire signed [7:0] eff_wt  [0:ROWS*COLS-1];
-    generate
-        genvar gi;
-        if (PIPELINE_TYPE == 0) begin : g_direct
-            for (gi = 0; gi < ROWS;      gi = gi+1) assign eff_act[gi] = act_in[gi];
-            for (gi = 0; gi < ROWS*COLS; gi = gi+1) assign eff_wt [gi] = weight_data[gi];
-        end else begin : g_winograd
-            for (gi = 0; gi < ROWS;      gi = gi+1) assign eff_act[gi] = xform_act_in[gi];
-            for (gi = 0; gi < ROWS*COLS; gi = gi+1) assign eff_wt [gi] = xform_wt_in [gi];
-        end
-    endgenerate
+    localparam integer DIAG_DEPTH = ROWS + COLS - 2;  
 
     // =========================================================================
     // Weight registers
@@ -131,29 +98,21 @@ module systolic_array #(
         end else if (weight_load) begin
             for (wr = 0; wr < ROWS; wr = wr+1)
                 for (wc = 0; wc < COLS; wc = wc+1)
-                    weight_reg[wr][wc] <= eff_wt[wr * COLS + wc];
+                    weight_reg[wr][wc] <= weight_data[wr * COLS + wc];
         end
     end
 
     // =========================================================================
     // Diagonal skew — en shift register  (depth DIAG_DEPTH+1)
     // =========================================================================
-    // en_diag[0] = en (registered 0 cycles = direct)
-    // en_diag[d] = en delayed d cycles
-    // PE[r][c].en = en_diag[r+c]
-    reg [DIAG_DEPTH:0] en_diag;   // [DIAG_DEPTH:0] gives indices 0..DIAG_DEPTH
+    reg [DIAG_DEPTH:0] en_diag;   
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             en_diag <= {(DIAG_DEPTH+1){1'b0}};
         else
             en_diag <= {en_diag[DIAG_DEPTH-1:0], en};  // shift in from LSB
     end
-    // en_diag[0] = en registered 1 cycle (shifts in next clock)
-    // We need en_diag index d = delay d from en:
-    //   d=0 → direct (combinatorial) → just use 'en' signal
-    //   d=1 → en_diag[0] (registered once)
-    //   d=DIAG_DEPTH → en_diag[DIAG_DEPTH-1]
-    // Build an array for clean indexing:
+    
     wire en_sked [0:DIAG_DEPTH];
     genvar gd;
     generate
@@ -165,10 +124,7 @@ module systolic_array #(
     // =========================================================================
     // Diagonal skew — activation pipeline  (per row, depth DIAG_DEPTH+1)
     // =========================================================================
-    // act_pipe[r][0] = eff_act[r] (direct)
-    // act_pipe[r][d] = eff_act[r] delayed d cycles
-    // PE[r][c].act_in = act_pipe[r][r+c]
-    reg signed [7:0] act_dly [0:ROWS-1][0:DIAG_DEPTH]; // [row][delay_stage]
+    reg signed [7:0] act_dly [0:ROWS-1][0:DIAG_DEPTH]; 
     integer adr, adc;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -177,7 +133,7 @@ module systolic_array #(
                     act_dly[adr][adc] <= 8'sd0;
         end else begin
             for (adr = 0; adr < ROWS; adr = adr+1) begin
-                act_dly[adr][0] <= eff_act[adr];
+                act_dly[adr][0] <= act_in[adr];
                 begin : blk_act_shift
                     integer sd;
                     for (sd = 1; sd <= DIAG_DEPTH; sd = sd+1)
@@ -186,12 +142,12 @@ module systolic_array #(
             end
         end
     end
-    // act_sked[r][d] : activation for row r delayed d cycles
+    
     wire signed [7:0] act_sked [0:ROWS-1][0:DIAG_DEPTH];
     generate
         genvar gr, gsd;
         for (gr = 0; gr < ROWS; gr = gr+1) begin : g_act_sked_row
-            assign act_sked[gr][0] = eff_act[gr];
+            assign act_sked[gr][0] = act_in[gr];
             for (gsd = 1; gsd <= DIAG_DEPTH; gsd = gsd+1) begin : g_act_sked_d
                 assign act_sked[gr][gsd] = act_dly[gr][gsd-1];
             end
@@ -258,21 +214,9 @@ module systolic_array #(
         end
     endgenerate
 
-    // Winograd stub: pass-through when PIPELINE_TYPE=0
-    generate
-        genvar xc;
-        for (xc = 0; xc < COLS; xc = xc+1) begin : g_xform_out
-            assign xform_out[xc] = result_out[xc];
-        end
-    endgenerate
-
     // =========================================================================
     // Performance counter
     // =========================================================================
-    //  PM_IDLE    : waiting for first en
-    //  PM_RUNNING : counting from first en; stops when all columns have fired
-    //  PM_DONE    : frozen until clear_acc
-    //
     localparam PM_IDLE    = 2'd0;
     localparam PM_RUNNING = 2'd1;
     localparam PM_DONE    = 2'd2;
