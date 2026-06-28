@@ -1,5 +1,5 @@
 // =============================================================================
-// tb_systolic_array_4x4.v  —  Testbench for systolic_array_4x4
+// tb_systolic_array.v  —  Testbench for systolic_array
 // =============================================================================
 //
 //  The 4×4 array computes ONE vector-matrix product per invocation:
@@ -16,13 +16,12 @@
 //  6.  Weight reload between invocations
 //  7.  Zero activations → all outputs 0
 //  8.  Perf counter: freeze and clear
-//  9.  Winograd stub: xform_out == result_out (PIPELINE_TYPE=0)
 //
 // =============================================================================
 
 `timescale 1ns/1ps
 
-module tb_systolic_array_4x4;
+module tb_systolic_array;
 
     // =========================================================================
     // Parameters (mirror DUT)
@@ -74,16 +73,12 @@ module tb_systolic_array_4x4;
     wire rv0,rv1,rv2,rv3;
     wire [31:0] perf_cycles;
     wire        perf_valid;
-    wire signed [ACCUM_WIDTH-1:0] xo0,xo1,xo2,xo3;
 
     // Array bridges
     wire signed [7:0] wd_a[0:ROWS*COLS-1];
     wire signed [7:0] ai_a[0:ROWS-1];
-    wire signed [7:0] xai_a[0:ROWS-1];
-    wire signed [7:0] xwi_a[0:ROWS*COLS-1];
     wire signed [ACCUM_WIDTH-1:0] ro_a[0:COLS-1];
     wire [0:COLS-1] rv_a;
-    wire signed [ACCUM_WIDTH-1:0] xo_a[0:COLS-1];
 
     assign wd_a[0]=wd0;   assign wd_a[1]=wd1;   assign wd_a[2]=wd2;
     assign wd_a[3]=wd3;   assign wd_a[4]=wd4;   assign wd_a[5]=wd5;
@@ -93,30 +88,22 @@ module tb_systolic_array_4x4;
     assign wd_a[15]=wd15;
     assign ai_a[0]=ai0; assign ai_a[1]=ai1; assign ai_a[2]=ai2; assign ai_a[3]=ai3;
 
-    genvar gx;
-    generate
-        for (gx=0;gx<ROWS;gx=gx+1)      assign xai_a[gx]=8'sd0;
-        for (gx=0;gx<ROWS*COLS;gx=gx+1) assign xwi_a[gx]=8'sd0;
-    endgenerate
-
     assign ro0=ro_a[0]; assign ro1=ro_a[1]; assign ro2=ro_a[2]; assign ro3=ro_a[3];
     assign rv0=rv_a[0]; assign rv1=rv_a[1]; assign rv2=rv_a[2]; assign rv3=rv_a[3];
-    assign xo0=xo_a[0]; assign xo1=xo_a[1]; assign xo2=xo_a[2]; assign xo3=xo_a[3];
 
     // =========================================================================
     // DUT
     // =========================================================================
-    systolic_array_4x4 #(
+    systolic_array #(
         .ROWS(ROWS),.COLS(COLS),
         .FRAC_BITS(0),.ACCUM_WIDTH(ACCUM_WIDTH),
-        .SATURATE(1),.ROUND_POLICY(1),.PIPELINE_TYPE(0)
+        .SATURATE(1),.ROUND_POLICY(1)
     ) DUT (
         .clk(clk),.rst_n(rst_n),
         .en(en),.clear_acc(clear_acc),.weight_load(weight_load),
         .weight_data(wd_a),.act_in(ai_a),
         .result_out(ro_a),.result_valid(rv_a),
-        .perf_cycles(perf_cycles),.perf_valid(perf_valid),
-        .xform_act_in(xai_a),.xform_wt_in(xwi_a),.xform_out(xo_a)
+        .perf_cycles(perf_cycles),.perf_valid(perf_valid)
     );
 
     // =========================================================================
@@ -239,8 +226,8 @@ module tb_systolic_array_4x4;
     integer r_i, c_i;
 
     initial begin
-        $dumpfile("tb_systolic_array_4x4.vcd");
-        $dumpvars(0, tb_systolic_array_4x4);
+        $dumpfile("tb_systolic_array.vcd");
+        $dumpvars(0, tb_systolic_array);
 
         // ------------------------------------------------------------------ //
         // Suite 1 — Identity weights: result_out[c] = act_in[c]             //
@@ -407,26 +394,6 @@ module tb_systolic_array_4x4;
         end
 
         // ------------------------------------------------------------------ //
-        // Suite 9 — Winograd stub: xform_out == result_out                  //
-        // ------------------------------------------------------------------ //
-        $display("\n=== Suite 9: Winograd pass-through (PIPELINE_TYPE=0) ===");
-        do_reset;
-        for (r_i=0; r_i<ROWS*COLS; r_i=r_i+1) wm_flat[r_i]=8'sd1;
-        av[0]=8'sd3; av[1]=8'sd1; av[2]=8'sd4; av[3]=8'sd1;
-        push_weights;
-        fire_activation;
-        capture_results(LATENCY_MAX+4);
-        // xform_out is wired to result_out when PIPELINE_TYPE=0
-        if(xo0===ro0) begin $display("  PASS  xform_out[0]==result_out[0] (%0d)",xo0); pass_cnt=pass_cnt+1; end
-        else begin $display("  FAIL  xo0=%0d ro0=%0d",xo0,ro0); fail_cnt=fail_cnt+1; end
-        if(xo1===ro1) begin $display("  PASS  xform_out[1]==result_out[1] (%0d)",xo1); pass_cnt=pass_cnt+1; end
-        else begin $display("  FAIL  xo1=%0d ro1=%0d",xo1,ro1); fail_cnt=fail_cnt+1; end
-        if(xo2===ro2) begin $display("  PASS  xform_out[2]==result_out[2] (%0d)",xo2); pass_cnt=pass_cnt+1; end
-        else begin $display("  FAIL  xo2=%0d ro2=%0d",xo2,ro2); fail_cnt=fail_cnt+1; end
-        if(xo3===ro3) begin $display("  PASS  xform_out[3]==result_out[3] (%0d)",xo3); pass_cnt=pass_cnt+1; end
-        else begin $display("  FAIL  xo3=%0d ro3=%0d",xo3,ro3); fail_cnt=fail_cnt+1; end
-
-        // ------------------------------------------------------------------ //
         // Efficiency report                                                  //
         // ------------------------------------------------------------------ //
         $display("\n--- Cycle Efficiency Report ---");
@@ -446,18 +413,6 @@ module tb_systolic_array_4x4;
         $display("    K=16 : %0d + 16 + %0d = %0d  eff=%.1f%%",
                  ROWS+COLS-2, ROWS-1, ROWS+COLS-2+16+ROWS-1,
                  100.0*16 / (ROWS+COLS-2+16+ROWS-1));
-        $display("");
-        $display("  --- Winograd comparison (same 4x4 array) ---");
-        $display("  Winograd F(2,3): 3 MACs instead of 4 per 2-element output");
-        $display("  K_eff per tile  = 3 vs K_direct = 4");
-        $display("  Direct  K=4  total=%0d  useful=4  eff=%.1f%%",
-                 ROWS+COLS-2+4+ROWS-1,
-                 100.0*4 / (ROWS+COLS-2+4+ROWS-1));
-        $display("  Winograd K=3 total=%0d  useful=4  eff=%.1f%%  (+%.1f%% speedup)",
-                 ROWS+COLS-2+3+ROWS-1,
-                 100.0*4 / (ROWS+COLS-2+3+ROWS-1),
-                 100.0*(1.0/(ROWS+COLS-2+3+ROWS-1) - 1.0/(ROWS+COLS-2+4+ROWS-1))
-                 / (1.0/(ROWS+COLS-2+4+ROWS-1)));
 
         // ------------------------------------------------------------------ //
         $display("\n======================================================");

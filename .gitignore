@@ -32,3 +32,5 @@ vivado/**/imports/
 vivado/**/*.xpr
 
 *.vcd
+
+scripts/python/*
