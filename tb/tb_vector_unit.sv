@@ -101,7 +101,8 @@ module tb_vector_unit;
 
   initial begin
     // reset
-    in_valid = 0; acc = '{default:0}; bias = '{default:0};
+    in_valid = 0;
+    for (int c = 0; c < OC_LANES; c++) begin acc[c] = 0; bias[c] = 0; end
     requant_mult = 16; requant_shift = 4; act_type = ACT_NONE;
     rst_n = 0;
     repeat (3) @(negedge clk);
