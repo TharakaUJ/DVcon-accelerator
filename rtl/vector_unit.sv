@@ -10,24 +10,20 @@
 // requant_mult/shift are per-tensor here; per-channel scale is a future
 // extension (load a scale vector alongside bias).
 //==============================================================================
-
-
-localparam int ACT_W     = 8;    // INT8 activations
-localparam int WGT_W     = 8;    // INT8 weights
-localparam int ACC_W     = 32;   // INT32 accumulation
-localparam int IC_LANES  = 16;   // reduction lanes per cycle (input channels)
-localparam int OC_LANES  = 32;   // parallel output channels (tile width)
-
-typedef enum logic [1:0] {
-  ACT_NONE = 2'd0,
-  ACT_RELU = 2'd1,
-  ACT_SILU = 2'd2
-} act_e;
-// -----------------------------------------------------------------------------
-
 module vector_unit
 #(
-  parameter real SILU_SCALE = 16.0     // SiLU LUT fixed-point scale
+  parameter real SILU_SCALE = 16.0,    // SiLU LUT fixed-point scale
+
+  // ---- inlined from former accel_pkg (package removed) --------------------
+  localparam int ACT_W    = 8,    // INT8 activations
+  localparam int WGT_W    = 8,    // INT8 weights
+  localparam int ACC_W    = 32,   // INT32 accumulation
+  localparam int IC_LANES = 16,   // reduction lanes per cycle (input channels)
+  localparam int OC_LANES = 32,   // parallel output channels (tile width)
+
+  localparam logic [1:0] ACT_NONE = 2'd0,
+  localparam logic [1:0] ACT_RELU = 2'd1,
+  localparam logic [1:0] ACT_SILU = 2'd2
 )(
   input  logic clk,
   input  logic rst_n,

@@ -9,21 +9,6 @@
 // The initial block uses real arithmetic, evaluated once at elaboration; Vivado
 // uses it to initialise the block ROM (no runtime cost, no external file).
 //==============================================================================
-
-
-localparam int ACT_W     = 8;    // INT8 activations
-localparam int WGT_W     = 8;    // INT8 weights
-localparam int ACC_W     = 32;   // INT32 accumulation
-localparam int IC_LANES  = 16;   // reduction lanes per cycle (input channels)
-localparam int OC_LANES  = 32;   // parallel output channels (tile width)
-
-typedef enum logic [1:0] {
-  ACT_NONE = 2'd0,
-  ACT_RELU = 2'd1,
-  ACT_SILU = 2'd2
-} act_e;
-// -----------------------------------------------------------------------------
-
 module silu_lut #(
   parameter real SCALE = 16.0      // INT8 codes per unit -> range [-8, +8)
 )(
