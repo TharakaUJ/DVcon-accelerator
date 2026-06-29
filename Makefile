@@ -43,7 +43,8 @@ endif
 
 SIMOUT := $(BUILD_DIR)/sim.vvp
 
-SRCS := $(TB_TOP) $(shell find $(RTL_DIR) -type f -name '*.sv' 2>/dev/null)
+TB_SUPPORT := $(filter-out $(TB_DIR)/tb_%.sv, $(wildcard $(TB_DIR)/*.sv))
+SRCS := $(TB_TOP) $(shell find $(RTL_DIR) -type f -name '*.sv' 2>/dev/null) $(TB_SUPPORT)
 
 FLAGS = -g2012 -DSIMULATION -I$(RTL_DIR) -Wall
 
