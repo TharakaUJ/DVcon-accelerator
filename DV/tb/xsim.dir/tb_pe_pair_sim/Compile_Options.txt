@@ -1,0 +1,1 @@
+-debug "typical" "tb_pe_pair" -s "tb_pe_pair_sim" -log "D:\DVCon\Accl2\Accl2.srcs\sources_1\imports\DV\tb\results\tb_pe_pair\xelab.log" 

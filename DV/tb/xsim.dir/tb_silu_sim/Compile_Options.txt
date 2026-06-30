@@ -1,0 +1,1 @@
+-debug "typical" "tb_silu" -s "tb_silu_sim" -log "D:\DVCon\Accl2\Accl2.srcs\sources_1\imports\DV\tb\results\tb_silu\xelab.log" 

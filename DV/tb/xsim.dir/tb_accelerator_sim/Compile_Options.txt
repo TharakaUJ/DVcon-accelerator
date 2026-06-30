@@ -1,0 +1,1 @@
+-debug "typical" "tb_accelerator" -s "tb_accelerator_sim" -log "D:\DVCon\Accl2\Accl2.srcs\sources_1\imports\DV\tb\results\tb_accelerator\xelab.log" 
