@@ -54,16 +54,16 @@ module tb_generic_mux;
 
     initial begin
         // --- Initialization ---
-        // rst_n      = 0; // FIX 2: Explicitly start in reset
-        // en         = 0;
-        // sel        = 0;
-        // input_data = 0;
+        // generic_mux is purely combinational (no clk/rst/en ports), so only
+        // the data channels need driving for the routing checks below.
+        sel        = 0;
+        input_data = 0;
 
-        // // Initialize unique signed data for each input channel
-        // input_data[(WIDTH*0) +: WIDTH] = 32'd10;
-        // input_data[(WIDTH*1) +: WIDTH] = -32'd20;
-        // input_data[(WIDTH*2) +: WIDTH] = 32'd30;
-        // input_data[(WIDTH*3) +: WIDTH] = -32'd40;
+        // Initialize unique signed data for each input channel
+        input_data[(WIDTH*0) +: WIDTH] = 32'd10;
+        input_data[(WIDTH*1) +: WIDTH] = -32'd20;
+        input_data[(WIDTH*2) +: WIDTH] = 32'd30;
+        input_data[(WIDTH*3) +: WIDTH] = -32'd40;
 
         // #15; // Wait for global reset stability
         

@@ -184,3 +184,129 @@ module pe_mac_int8 #(
     end
 
 endmodule
+
+// =============================================================================
+// tb_pe  —  Self-checking testbench for systolic_pe (the PE used by the array)
+//   Run: iverilog -g2012 -o tb ../rtl/pe.sv tb_pe.sv && vvp tb
+// =============================================================================
+module tb_pe;
+
+    localparam integer ACCUM_WIDTH = 32;
+    localparam         CLK_PERIOD  = 10;
+
+    reg  clk = 0;
+    always #(CLK_PERIOD/2) clk = ~clk;
+
+    reg                            rst_n;
+    reg                            en;
+    reg  signed [7:0]              weight_in;
+    reg  signed [7:0]              act_in;
+    reg  signed [ACCUM_WIDTH-1:0]  psum_in;
+    reg                            psum_in_valid;
+    wire signed [ACCUM_WIDTH-1:0]  psum_out;
+    wire                           out_valid;
+
+    integer pass_cnt = 0;
+    integer fail_cnt = 0;
+
+    // FRAC_BITS=0 → pure integer MAC, matches the array configuration
+    systolic_pe #(
+        .FRAC_BITS(0), .ACCUM_WIDTH(ACCUM_WIDTH),
+        .SATURATE(1),  .ROUND_POLICY(1)
+    ) dut (
+        .clk(clk), .rst_n(rst_n), .en(en),
+        .weight_in(weight_in), .act_in(act_in),
+        .psum_in(psum_in), .psum_in_valid(psum_in_valid),
+        .psum_out(psum_out), .out_valid(out_valid)
+    );
+
+    task tick; @(posedge clk); #1; endtask
+
+    task check;
+        input [255:0] tag;
+        input integer got;
+        input integer exp;
+        begin
+            if (got === exp) begin
+                $display("  PASS  %s  got=%0d", tag, got);
+                pass_cnt = pass_cnt + 1;
+            end else begin
+                $display("  FAIL  %s  got=%0d  exp=%0d", tag, got, exp);
+                fail_cnt = fail_cnt + 1;
+            end
+        end
+    endtask
+
+    // Drive one enabled MAC and sample the registered result
+    task do_mac;
+        input signed [7:0]             a;
+        input signed [7:0]             w;
+        input signed [ACCUM_WIDTH-1:0] pin;
+        input                          pin_valid;
+        begin
+            act_in        = a;
+            weight_in     = w;
+            psum_in       = pin;
+            psum_in_valid = pin_valid;
+            en            = 1'b1;
+            tick;                 // result registers on this edge
+            en            = 1'b0;
+        end
+    endtask
+
+    localparam signed [ACCUM_WIDTH-1:0] SAT_MAX = {1'b0, {(ACCUM_WIDTH-1){1'b1}}};
+    localparam signed [ACCUM_WIDTH-1:0] SAT_MIN = {1'b1, {(ACCUM_WIDTH-1){1'b0}}};
+
+    initial begin
+        $dumpfile("tb_pe.vcd");
+        $dumpvars(0, tb_pe);
+
+        rst_n=0; en=0; weight_in=0; act_in=0; psum_in=0; psum_in_valid=0;
+        tick; tick; rst_n=1; tick;
+
+        // 1. Plain integer MAC, no upstream psum
+        do_mac(8'sd3, 8'sd4, 32'sd0, 1'b0);
+        check("MAC 3*4 (no psum)", psum_out, 12);
+        check("out_valid after en", out_valid, 1);
+
+        // 2. Accumulate with a valid upstream partial sum
+        do_mac(8'sd2, 8'sd5, 32'sd100, 1'b1);
+        check("MAC 2*5 + psum 100", psum_out, 110);
+
+        // 3. Signed product
+        do_mac(-8'sd3, 8'sd4, 32'sd0, 1'b0);
+        check("MAC -3*4", psum_out, -12);
+
+        // 4. psum_in ignored when psum_in_valid=0
+        do_mac(8'sd7, 8'sd1, 32'sd999, 1'b0);
+        check("psum_in ignored (valid=0)", psum_out, 7);
+
+        // 5. Hold value and drop valid when en=0
+        en = 1'b0; tick;
+        check("psum_out held when en=0", psum_out, 7);
+        check("out_valid low when en=0", out_valid, 0);
+
+        // 6. Positive saturation
+        do_mac(8'sd2, 8'sd2, SAT_MAX, 1'b1);
+        check("positive saturation", psum_out, SAT_MAX);
+
+        // 7. Negative saturation
+        do_mac(-8'sd2, 8'sd2, SAT_MIN, 1'b1);
+        check("negative saturation", psum_out, SAT_MIN);
+
+        $display("\n==================================");
+        $display("  PE TESTBENCH COMPLETE");
+        $display("  Passed: %0d   Failed: %0d", pass_cnt, fail_cnt);
+        if (fail_cnt == 0) $display("  ALL PE TESTS PASSED");
+        else               $display("  SOME PE TESTS FAILED");
+        $display("==================================");
+        $finish;
+    end
+
+    initial begin
+        #(CLK_PERIOD * 2000);
+        $display("PE TB WATCHDOG TIMEOUT");
+        $finish;
+    end
+
+endmodule
