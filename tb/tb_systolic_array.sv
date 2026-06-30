@@ -16,6 +16,8 @@
 //  6.  Weight reload between invocations
 //  7.  Zero activations → all outputs 0
 //  8.  Perf counter: freeze and clear
+//  9.  Continuous pipelined streaming (en asserted every cycle, K vectors
+//      back-to-back, results checked per-vector, per-column in arrival order)
 //
 // =============================================================================
 
@@ -391,6 +393,113 @@ module tb_systolic_array;
             clear_acc=1; tick; clear_acc=0; ticks(2);
             check_int("S8-perf_valid cleared", perf_valid, 0);
             check_int("S8-perf_cycles reset",  perf_cycles, 0);
+        end
+
+        // ------------------------------------------------------------------ //
+        // Suite 9 — Continuous pipelined streaming (en every cycle)         //
+        //                                                                    //
+        //   Fires K activation vectors back-to-back, one per cycle, with no  //
+        //   gaps. Because each output column c is a FIXED delay line of      //
+        //   (ROWS+c) cycles relative to its own en pulse, the j-th valid     //
+        //   pulse seen on column c corresponds to the j-th vector fired      //
+        //   (FIFO order is preserved per-column). This suite captures each   //
+        //   column's results in arrival order and checks them against the   //
+        //   golden value for the matching vector index.                     //
+        //                                                                    //
+        //   It also demonstrates that at any single cycle, the COLS output   //
+        //   wires are NOT one coherent row of results — they belong to       //
+        //   DIFFERENT input vectors (col c lags col 0 by c cycles). A        //
+        //   consumer must de-skew externally (delay col c by COLS-1-c       //
+        //   cycles) to reconstruct aligned rows.                             //
+        // ------------------------------------------------------------------ //
+        $display("\n=== Suite 9: Continuous pipelined streaming ===");
+        do_reset;
+        for (r_i=0; r_i<ROWS*COLS; r_i=r_i+1) wm_flat[r_i]=8'sd1;
+        push_weights;
+
+        begin : blk_s9_stream
+            localparam integer K = 10;
+            integer k9, r9, c9;
+            // K activation vectors and their golden results
+            reg  signed [7:0] av_stream  [0:K-1][0:ROWS-1];
+            integer           gold_stream[0:K-1][0:COLS-1];
+            integer           cap_stream [0:COLS-1][0:K-1]; // captured, in arrival order
+            integer           col_cnt    [0:COLS-1];        // # captured per column
+            integer           t9, timeout9;
+            integer           all_done;
+
+            // Build K distinct, varying activation vectors and their golden sums
+            for (k9=0; k9<K; k9=k9+1) begin
+                for (r9=0; r9<ROWS; r9=r9+1)
+                    av_stream[k9][r9] = $signed((k9*ROWS + r9 + 1) % 17) - 8'sd8; // -8..+8 range
+                for (c9=0; c9<COLS; c9=c9+1) begin
+                    gold_stream[k9][c9] = 0;
+                    for (r9=0; r9<ROWS; r9=r9+1)
+                        gold_stream[k9][c9] = gold_stream[k9][c9]
+                                             + av_stream[k9][r9] * wm_flat[r9*COLS+c9];
+                end
+            end
+
+            for (c9=0; c9<COLS; c9=c9+1) col_cnt[c9] = 0;
+
+            // Drive en=1 with a new vector every cycle, K cycles in a row,
+            // while simultaneously sampling result_valid/result_out so we
+            // don't miss any single-cycle pulses (results keep arriving
+            // even while we're still pushing new vectors in).
+            k9 = 0;
+            timeout9 = K + LATENCY_MAX + 6;
+            for (t9 = 0; t9 < timeout9; t9 = t9+1) begin
+                if (k9 < K) begin
+                    ai0 = av_stream[k9][0]; ai1 = av_stream[k9][1];
+                    ai2 = av_stream[k9][2]; ai3 = av_stream[k9][3];
+                    en  = 1;
+                end else begin
+                    ai0=0; ai1=0; ai2=0; ai3=0;
+                    en  = 0;
+                end
+
+                // Sample BEFORE the clock edge moves us forward (current
+                // combinational/registered output state for this cycle)
+                if (rv0 && col_cnt[0]<K) begin cap_stream[0][col_cnt[0]]=ro0; col_cnt[0]=col_cnt[0]+1; end
+                if (rv1 && col_cnt[1]<K) begin cap_stream[1][col_cnt[1]]=ro1; col_cnt[1]=col_cnt[1]+1; end
+                if (rv2 && col_cnt[2]<K) begin cap_stream[2][col_cnt[2]]=ro2; col_cnt[2]=col_cnt[2]+1; end
+                if (rv3 && col_cnt[3]<K) begin cap_stream[3][col_cnt[3]]=ro3; col_cnt[3]=col_cnt[3]+1; end
+
+                // Demonstrate column misalignment: on the very cycle col0's
+                // FIRST result appears, col3 has not produced anything yet
+                // for the SAME vector (it's still 3 cycles away) — i.e. the
+                // simultaneous outputs across columns are from different
+                // vectors once streaming is underway.
+                if (col_cnt[0]==1 && col_cnt[3]==0 && rv0) begin
+                    $display("  INFO  S9-deskew: col0 fired (vec#0) while col3 still pending -> outputs are NOT row-aligned across columns mid-stream");
+                end
+
+                tick;
+                if (k9 < K) k9 = k9 + 1;
+            end
+
+            all_done = 1;
+            for (c9=0; c9<COLS; c9=c9+1)
+                if (col_cnt[c9] < K) all_done = 0;
+            check_int("S9-all columns captured K results", all_done, 1);
+
+            if (all_done) begin
+                for (k9=0; k9<K; k9=k9+1) begin
+                    for (c9=0; c9<COLS; c9=c9+1) begin
+                        if (cap_stream[c9][k9] === gold_stream[k9][c9]) begin
+                            $display("  PASS  S9-stream vec[%0d] col[%0d] got=%0d", k9, c9, cap_stream[c9][k9]);
+                            pass_cnt = pass_cnt + 1;
+                        end else begin
+                            $display("  FAIL  S9-stream vec[%0d] col[%0d] got=%0d exp=%0d",
+                                     k9, c9, cap_stream[c9][k9], gold_stream[k9][c9]);
+                            fail_cnt = fail_cnt + 1;
+                        end
+                    end
+                end
+            end else begin
+                $display("  TIMEOUT: col_cnt = %0d,%0d,%0d,%0d (expected %0d each)",
+                          col_cnt[0],col_cnt[1],col_cnt[2],col_cnt[3], K);
+            end
         end
 
         // ------------------------------------------------------------------ //
