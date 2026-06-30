@@ -9,6 +9,8 @@
 // The initial block uses real arithmetic, evaluated once at elaboration; Vivado
 // uses it to initialise the block ROM (no runtime cost, no external file).
 //==============================================================================
+`timescale 1ns/1ps
+
 module silu_lut #(
   parameter real SCALE = 16.0      // INT8 codes per unit -> range [-8, +8)
 )(
