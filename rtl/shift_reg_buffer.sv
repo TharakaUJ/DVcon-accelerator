@@ -30,9 +30,11 @@ module shift_reg_buffer #(
         genvar stage, w;
         for (stage = 0; stage < BUFFER_DEPTH; stage = stage + 1) 
         begin : buffer_gen
-            // 1. Declare local 1D arrays inside the named generate block
-            logic signed [DATA_WIDTH-1:0] inst_in  [0:BUFFER_WIDTH-1];
-            logic signed [DATA_WIDTH-1:0] inst_out [0:BUFFER_WIDTH-1];
+            // 1. Declare local 1D arrays inside the named generate block.
+            //    inst_out must be a net (wire): Icarus only propagates a module's
+            //    unpacked-array OUTPUT port through a net, not a variable.
+            wire signed [DATA_WIDTH-1:0] inst_in  [0:BUFFER_WIDTH-1];
+            wire signed [DATA_WIDTH-1:0] inst_out [0:BUFFER_WIDTH-1];
             
             // 2. Map the 2D array elements to the local 1D arrays
             for (w = 0; w < BUFFER_WIDTH; w = w + 1) begin : connection_loop

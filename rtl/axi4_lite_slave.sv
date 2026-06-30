@@ -48,6 +48,17 @@ module axi4_lite_slave #(
     output logic [15:0]             img_cols,
     output logic [31:0]             weight_addr,
 
+    // ── CR-3/CR-5 extended config (regs 0x18+) ───────────────────────────────
+    output logic [3:0]              cfg_kernel,       // K (square kernel)
+    output logic [3:0]              cfg_stride,       // S
+    output logic [3:0]              cfg_pad,          // P
+    output logic [15:0]             cfg_cin,          // input channels
+    output logic [15:0]             cfg_cout,         // output channels
+    output logic [15:0]             cfg_requant_mult, // requant multiplier
+    output logic [4:0]              cfg_requant_shift,// requant shift
+    output logic [1:0]              cfg_act_type,     // 0=NONE 1=RELU 2=SILU
+    output logic [31:0]             bias_addr,        // param-table base (DMA, future)
+
     // ── Accelerator status inputs ─────────────────────────────────────────────
     input  logic                    busy,
     input  logic                    done,
@@ -64,6 +75,11 @@ module axi4_lite_slave #(
     localparam logic [7:0] REG_DST_ADDR    = 8'h0C;
     localparam logic [7:0] REG_IMG_DIM     = 8'h10;
     localparam logic [7:0] REG_WEIGHT_ADDR = 8'h14;
+    // CR-3/CR-5 extensions (appended; 0x00–0x14 layout unchanged)
+    localparam logic [7:0] REG_KERNEL      = 8'h18;  // [3:0]K [7:4]stride [11:8]pad
+    localparam logic [7:0] REG_CHAN        = 8'h1C;  // [15:0]C_IN [31:16]C_OUT
+    localparam logic [7:0] REG_REQUANT     = 8'h20;  // [15:0]mult [20:16]shift [22:21]act
+    localparam logic [7:0] REG_BIAS_ADDR   = 8'h24;  // param-table base addr
 
     // =========================================================================
     // Register file
@@ -73,6 +89,10 @@ module axi4_lite_slave #(
     logic [31:0] reg_dst_addr;
     logic [31:0] reg_img_dim;
     logic [31:0] reg_weight_addr;
+    logic [31:0] reg_kernel;      // CR-3
+    logic [31:0] reg_chan;        // CR-3
+    logic [31:0] reg_requant;     // CR-5
+    logic [31:0] reg_bias_addr;   // CR-5
 
     // STATUS is hardware-driven; assembled combinatorially
     logic [31:0] reg_status;
@@ -175,6 +195,10 @@ module axi4_lite_slave #(
             reg_dst_addr    <= 32'h8100_0000;
             reg_img_dim     <= 32'h0020_0020;
             reg_weight_addr <= 32'h8080_0000;
+            reg_kernel      <= 32'h0000_0103;   // K=3, stride=1, pad=0
+            reg_chan        <= 32'h0010_0010;    // C_IN=16, C_OUT=16
+            reg_requant     <= 32'h0000_0001;    // mult=1, shift=0, act=NONE
+            reg_bias_addr   <= 32'h8180_0000;
         end else begin
             // Self-clear START bit one cycle after it is latched
             if (start_pulse)
@@ -187,6 +211,10 @@ module axi4_lite_slave #(
                     REG_DST_ADDR:    reg_dst_addr    <= apply_strobe(reg_dst_addr,    wr_data_lat, wr_strb_lat);
                     REG_IMG_DIM:     reg_img_dim     <= apply_strobe(reg_img_dim,     wr_data_lat, wr_strb_lat);
                     REG_WEIGHT_ADDR: reg_weight_addr <= apply_strobe(reg_weight_addr, wr_data_lat, wr_strb_lat);
+                    REG_KERNEL:      reg_kernel      <= apply_strobe(reg_kernel,      wr_data_lat, wr_strb_lat);
+                    REG_CHAN:        reg_chan        <= apply_strobe(reg_chan,        wr_data_lat, wr_strb_lat);
+                    REG_REQUANT:     reg_requant     <= apply_strobe(reg_requant,     wr_data_lat, wr_strb_lat);
+                    REG_BIAS_ADDR:   reg_bias_addr   <= apply_strobe(reg_bias_addr,   wr_data_lat, wr_strb_lat);
                     REG_STATUS:      ; // hardware-driven, writes ignored
                     default:         ; // unmapped address, ignore
                 endcase
@@ -205,6 +233,17 @@ module axi4_lite_slave #(
     assign img_rows    = reg_img_dim[31:16];
     assign img_cols    = reg_img_dim[15:0];
     assign weight_addr = reg_weight_addr;
+
+    // CR-3/CR-5 extended config decode
+    assign cfg_kernel        = reg_kernel[3:0];
+    assign cfg_stride        = reg_kernel[7:4];
+    assign cfg_pad           = reg_kernel[11:8];
+    assign cfg_cin           = reg_chan[15:0];
+    assign cfg_cout          = reg_chan[31:16];
+    assign cfg_requant_mult  = reg_requant[15:0];
+    assign cfg_requant_shift = reg_requant[20:16];
+    assign cfg_act_type      = reg_requant[22:21];
+    assign bias_addr         = reg_bias_addr;
 
     // =========================================================================
     // Read path FSM
@@ -251,6 +290,10 @@ module axi4_lite_slave #(
             REG_DST_ADDR:    s_rdata = reg_dst_addr;
             REG_IMG_DIM:     s_rdata = reg_img_dim;
             REG_WEIGHT_ADDR: s_rdata = reg_weight_addr;
+            REG_KERNEL:      s_rdata = reg_kernel;
+            REG_CHAN:        s_rdata = reg_chan;
+            REG_REQUANT:     s_rdata = reg_requant;
+            REG_BIAS_ADDR:   s_rdata = reg_bias_addr;
             default:         s_rdata = 32'hDEAD_BEEF; // unmapped — visible in waveform
         endcase
     end

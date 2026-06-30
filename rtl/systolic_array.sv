@@ -55,7 +55,9 @@ module systolic_array #(
     parameter integer FRAC_BITS     = 0,
     parameter integer ACCUM_WIDTH   = 32,
     parameter integer SATURATE      = 1,
-    parameter integer ROUND_POLICY  = 1
+    parameter integer ROUND_POLICY  = 1,
+    parameter integer USE_DSP       = 1,  // CR-4: map PE MAC onto DSP48E1
+    parameter integer SHADOW_WEIGHTS = 0  // CR-2 Option B: shadow reg + swap
 )(
     input  wire clk,
     input  wire rst_n,
@@ -63,7 +65,15 @@ module systolic_array #(
     // ── Control ──────────────────────────────────────────────────────────────
     input  wire en,           // assert for one cycle per activation vector
     input  wire clear_acc,    // resets perf counter and weight registers
-    input  wire weight_load,  // strobe: load weight_data → weight registers
+    input  wire weight_load,  // strobe: load weight_data → ACTIVE weight regs (legacy / Option A single-cycle)
+
+    // ── CR-2 Option B: hidden double-buffered weight load ────────────────────
+    //  weight_load_shadow : latch weight_data into the SHADOW bank (can run in
+    //                       the background while the array computes current tile)
+    //  weight_swap        : 1-cycle strobe — copy shadow → active at tile boundary
+    //  Only used when SHADOW_WEIGHTS=1; left unconnected otherwise.
+    input  wire weight_load_shadow,
+    input  wire weight_swap,
 
     // ── Weight bus (flat, W[r][c] = weight_data[r*COLS+c]) ──────────────────
     input  wire signed [7:0] weight_data [0:ROWS*COLS-1],
@@ -88,19 +98,52 @@ module systolic_array #(
     // =========================================================================
     // Weight registers
     // =========================================================================
-    reg signed [7:0] weight_reg [0:ROWS-1][0:COLS-1];
+    reg signed [7:0] weight_reg    [0:ROWS-1][0:COLS-1];  // active weights → PEs
+    reg signed [7:0] weight_shadow [0:ROWS-1][0:COLS-1];  // CR-2 Option B shadow
     integer wr, wc;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (wr = 0; wr < ROWS; wr = wr+1)
-                for (wc = 0; wc < COLS; wc = wc+1)
-                    weight_reg[wr][wc] <= 8'sd0;
-        end else if (weight_load) begin
-            for (wr = 0; wr < ROWS; wr = wr+1)
-                for (wc = 0; wc < COLS; wc = wc+1)
-                    weight_reg[wr][wc] <= weight_data[wr * COLS + wc];
+
+    generate
+    if (SHADOW_WEIGHTS != 0) begin : g_shadow_load
+        // Shadow bank captures the next tile in the background; a single-cycle
+        // weight_swap promotes it to active at the tile boundary → 0 stall.
+        always @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                for (wr = 0; wr < ROWS; wr = wr+1)
+                    for (wc = 0; wc < COLS; wc = wc+1) begin
+                        weight_reg[wr][wc]    <= 8'sd0;
+                        weight_shadow[wr][wc] <= 8'sd0;
+                    end
+            end else begin
+                if (weight_load_shadow)
+                    for (wr = 0; wr < ROWS; wr = wr+1)
+                        for (wc = 0; wc < COLS; wc = wc+1)
+                            weight_shadow[wr][wc] <= weight_data[wr * COLS + wc];
+                // weight_load still supported for direct/bring-up loads
+                if (weight_load)
+                    for (wr = 0; wr < ROWS; wr = wr+1)
+                        for (wc = 0; wc < COLS; wc = wc+1)
+                            weight_reg[wr][wc] <= weight_data[wr * COLS + wc];
+                else if (weight_swap)
+                    for (wr = 0; wr < ROWS; wr = wr+1)
+                        for (wc = 0; wc < COLS; wc = wc+1)
+                            weight_reg[wr][wc] <= weight_shadow[wr][wc];
+            end
+        end
+    end else begin : g_direct_load
+        // Legacy / Option A: single-cycle direct load into active registers.
+        always @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                for (wr = 0; wr < ROWS; wr = wr+1)
+                    for (wc = 0; wc < COLS; wc = wc+1)
+                        weight_reg[wr][wc] <= 8'sd0;
+            end else if (weight_load) begin
+                for (wr = 0; wr < ROWS; wr = wr+1)
+                    for (wc = 0; wc < COLS; wc = wc+1)
+                        weight_reg[wr][wc] <= weight_data[wr * COLS + wc];
+            end
         end
     end
+    endgenerate
 
     // =========================================================================
     // Diagonal skew — en shift register  (depth DIAG_DEPTH+1)
@@ -181,7 +224,8 @@ module systolic_array #(
                     .FRAC_BITS   (FRAC_BITS),
                     .ACCUM_WIDTH (ACCUM_WIDTH),
                     .SATURATE    (SATURATE),
-                    .ROUND_POLICY(ROUND_POLICY)
+                    .ROUND_POLICY(ROUND_POLICY),
+                    .USE_DSP     (USE_DSP)
                 ) u_pe (
                     .clk           (clk),
                     .rst_n         (rst_n),

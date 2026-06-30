@@ -30,11 +30,18 @@
 
 `timescale 1ns/1ps
 
+// CR-4: USE_DSP selects DSP48E1 mapping of the multiply+accumulate.
+//   1 (default) → (* use_dsp = "yes" *) on the MAC nets so Vivado packs the
+//                 8b×8b multiply + 32b post-add onto a DSP48E1 P-path.
+//   0           → leave to generic fabric inference (LUT multiplier).
+// Numerics are identical either way; only the implementation hint changes,
+// so bit-exactness vs the original pe.sv is preserved (CR-4 acceptance).
 module systolic_pe #(
     parameter integer FRAC_BITS    = 0,
     parameter integer ACCUM_WIDTH  = 32,
     parameter integer SATURATE     = 1,
-    parameter integer ROUND_POLICY = 1
+    parameter integer ROUND_POLICY = 1,
+    parameter integer USE_DSP      = 1
 )(
     input  wire                          clk,
     input  wire                          rst_n,
@@ -54,7 +61,11 @@ module systolic_pe #(
     // Multiply  (8b × 8b → 16b signed)
     // -------------------------------------------------------------------------
     localparam PROD_W = 16;
-    wire signed [PROD_W-1:0]      product     = act_in * weight_in;
+    // (* use_dsp *) hints Vivado to map the multiply (and following add) to a
+    // DSP48E1 instead of fabric LUTs. Driven by the USE_DSP parameter.
+    (* use_dsp = "yes" *) wire signed [PROD_W-1:0] product_dsp = act_in * weight_in;
+                          wire signed [PROD_W-1:0] product_lut = act_in * weight_in;
+    wire signed [PROD_W-1:0]      product     = (USE_DSP != 0) ? product_dsp : product_lut;
     wire signed [ACCUM_WIDTH-1:0] prod_wide   =
         {{(ACCUM_WIDTH-PROD_W){product[PROD_W-1]}}, product};
 

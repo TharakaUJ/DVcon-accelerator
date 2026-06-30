@@ -15,11 +15,14 @@ module vector_unit
   parameter real SILU_SCALE = 16.0,    // SiLU LUT fixed-point scale
 
   // ---- inlined from former accel_pkg (package removed) --------------------
+  // CR-5: OC_LANES promoted to a parameter so the stage width can track the
+  // array COLS (16 for this build). Defaults preserve the original 32.
+  parameter int OC_LANES = 32,   // parallel output channels (tile width)
+
   localparam int ACT_W    = 8,    // INT8 activations
   localparam int WGT_W    = 8,    // INT8 weights
   localparam int ACC_W    = 32,   // INT32 accumulation
   localparam int IC_LANES = 16,   // reduction lanes per cycle (input channels)
-  localparam int OC_LANES = 32,   // parallel output channels (tile width)
 
   localparam logic [1:0] ACT_NONE = 2'd0,
   localparam logic [1:0] ACT_RELU = 2'd1,
