@@ -10,7 +10,7 @@
 //   x=-16 -> v=-1.0: -1*0.2689=-0.269*16  -> -4   (0xFC)
 //   x=127 -> ~7.9  : saturates             -> 127  (0x7F)
 //
-// Run: iverilog -g2012 -o tb ../rtl/silu_lut.sv tb_silu.sv && vvp tb
+// Run: iverilog -g2012 -o tb ../rtl/accel_pkg.sv ../rtl/silu_lut.sv tb_silu.sv && vvp tb
 //==============================================================================
 
 module tb_silu;

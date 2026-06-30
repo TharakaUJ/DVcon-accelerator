@@ -106,7 +106,7 @@ module tb_axi4_lite_slave;
     // VCD dump
     // =========================================================================
     initial begin
-        $dumpfile("build/axi4_lite_slave_wave.vcd");
+        $dumpfile("tb_axi4_lite_slave.vcd");
         $dumpvars(0, tb_axi4_lite_slave);
     end
 
