@@ -90,7 +90,7 @@ clean:
 	rm -f $(BUILD_DIR)/*.vcd $(BUILD_DIR)/*.gtkw $(SIMOUT)
 	@echo "Cleaned."
 
-setup:
+init:
 	@echo "========Setting up the project========"
 	@echo "unzipping DVCon_2026_ip.zip"
 	unzip DVCon_2026_ip.zip
