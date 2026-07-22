@@ -34,3 +34,6 @@ vivado/**/*.xpr
 *.vcd
 
 scripts/python/*
+
+DVCon_2026/*
+*.zip

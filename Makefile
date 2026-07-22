@@ -89,3 +89,21 @@ lint: dirs
 clean:
 	rm -f $(BUILD_DIR)/*.vcd $(BUILD_DIR)/*.gtkw $(SIMOUT)
 	@echo "Cleaned."
+
+setup:
+	@echo "========Setting up the project========"
+	@echo "unzipping DVCon_2026_ip.zip"
+	unzip DVCon_2026_ip.zip
+	@echo "copying rtl files to DVCon_2026/DVCon_SoC_SRC/ACCELERATOR_IP/"
+	rm -r DVCon_2026/DVCon_SoC_SRC/ACCELERATOR_IP/*
+	cp -r rtl/* DVCon_2026/DVCon_SoC_SRC/ACCELERATOR_IP/
+	@echo "Aplying patches"
+	git apply patches/*.patch
+	@echo "========Setup complete.========"
+
+reinit:
+	@echo "Reinitializing the project..."
+	rm -r DVCon_2026
+	$(MAKE) setup
+	
+	

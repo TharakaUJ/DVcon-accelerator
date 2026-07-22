@@ -1,0 +1,20 @@
+--- a/DVCon_2026/DVCon_SoC_SRC/TOP/Top.vhd
++++ b/DVCon_2026/DVCon_SoC_SRC/TOP/Top.vhd
+@@ -251,7 +251,7 @@ architecture Top_a of Top is
+     ); 
+     end component;
+ 
+-component Accelerator_Top 
++component accelerator
+     Port (  s_axi_aclk 			: 	in 	  STD_LOGIC;                                    
+ 			s_axi_aresetn 		: 	in 	  STD_LOGIC;                                                      
+ 		      
+@@ -670,7 +670,7 @@ begin
+         ); 
+  
+ 	   	   
+-u_Accelerator_Top  :   Accelerator_Top
++u_Accelerator_Top  :   accelerator
+ Port map (  s_axi_aclk 			=>  axi_clk 		      ,
+             s_axi_aresetn 		=>  reset_n 	      ,
+ 			                                        
