@@ -243,8 +243,10 @@ module axi4_lite_slave #(
     assign s_rresp   = 2'b00; // OKAY
 
     // Read data mux
+    wire [7:0] rd_addr_byte = rd_addr_lat[7:0];
+
     always_comb begin
-        case (rd_addr_lat[7:0])
+        case (rd_addr_byte)
             REG_CTRL:        s_rdata = reg_ctrl;
             REG_STATUS:      s_rdata = reg_status;
             REG_SRC_ADDR:    s_rdata = reg_src_addr;

@@ -71,10 +71,9 @@ module shift_reg_buffer #(
                 end
             end
         end else begin : gen_hide
-            always_comb begin
-                for (int i = 0; i < BUFFER_DEPTH * BUFFER_WIDTH; i = i + 1) begin
-                    connect_wires_out[i] = '0;
-                end
+            genvar i;
+            for (i = 0; i < BUFFER_DEPTH * BUFFER_WIDTH; i = i + 1) begin : gen_zero_loop
+                assign connect_wires_out[i] = '0;
             end
         end
     endgenerate

@@ -54,11 +54,7 @@ module register_bank #(
                 end
             end
         end else begin : gen_hide
-            always_comb begin
-                for (int i = 0; i < BUFFER_WIDTH; i = i + 1) begin
-                    connect_wires_out[i] = '0;
-                end
-            end
+            assign connect_wires_out = '0;
         end
     endgenerate
 
