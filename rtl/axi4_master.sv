@@ -81,7 +81,7 @@ module axi4_master #(
 );
 
     // =========================================================================
-    // Fixed AXI4 field values (Claude.md Section 6)
+    // Fixed AXI4 field values
     // =========================================================================
     localparam logic [2:0]              AXI_SIZE  = 3'b011;  // 8 bytes/beat
     localparam logic [1:0]              AXI_BURST = 2'b01;   // INCR
