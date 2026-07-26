@@ -133,12 +133,12 @@ module accelerator #(
 
     // bram out buffer interface
     logic out_rd_en;
-    logic [9:0] out_wr_addr, out_rd_addr; // need to wire the first one to the control unit
-    logic out_wr_buf, out_rd_buf; // need to wire the second one to the control unit
+    logic [9:0] out_wr_addr, out_rd_addr;
+    logic out_wr_buf, out_rd_buf;
     logic out_rd_valid; // havent used yet
 
     // systolic array interface
-    logic array_en, array_clear_acc, array_weight_load; // need to wire these to the control unit
+    logic array_en, array_clear_acc, array_weight_load;
     logic [DATA_WIDTH-1:0] systolic_array_act_in;
     logic [DATA_WIDTH-1:0] systolic_array_weight_in;
     logic [31:0] array_result_out;
@@ -147,9 +147,9 @@ module accelerator #(
     logic array_perf_valid;
 
     // vector unit interface
-    logic [31:0] vector_bias;
-    logic [31:0] vector_requant_mult;
-    logic [31:0] vector_requant_shift;
+    logic [31:0] vector_bias; // have to wire thise. define a new memory may be
+    logic [31:0] vector_requant_mult; // have to wire this. define a new memory may be
+    logic [31:0] vector_requant_shift; // have to wire this. define a new memory may be
     logic [1:0] vector_act_type;
     logic vector_out_valid; // havent used yet
     logic [DATA_WIDTH-1:0] vector_unit_out;
@@ -386,7 +386,14 @@ module accelerator #(
         .act_rd_buf (act_rd_buf),
         .out_rd_en (out_rd_en),
         .out_rd_addr (out_rd_addr),
-        .out_wr_buf(out_wr_buf)
+        .out_rd_buf (out_rd_buf),
+        .out_wr_buf(out_wr_buf),
+        .out_wr_addr(out_wr_addr),
+        // .out_wr_en(out_wr_en),
+
+        .array_en (array_en),
+        .array_clear_acc (array_clear_acc),
+        .array_weight_load (array_weight_load)
     );
 
 endmodule

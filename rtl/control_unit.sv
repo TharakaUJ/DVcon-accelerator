@@ -69,7 +69,15 @@ module control_unit #(
     // ── Output BRAM control ──────────────────────────────────────────────────
     output wire                  out_rd_en,
     output wire [OUT_AW-1:0]     out_rd_addr,
-    output wire                  out_wr_buf
+    output wire                  out_rd_buf, // havent wired this yet, but will be needed for the output buffer
+    output wire                  out_wr_en, // havent wired this yet, but will be needed for the output buffer
+    output wire [OUT_AW-1:0]     out_wr_addr, // havent wired this yet, but will be needed for the output buffer
+    output wire                  out_wr_buf,
+
+    // ── Systolic Array control ────────────────────────────────────────────────
+    output wire                  array_en, // haven't wired this yet, but will be needed for the systolic array
+    output wire                  array_clear_acc, // haven't wired this yet, but will be needed for the systolic array
+    output wire                  array_weight_load, // haven't wired this yet, but will be needed for the systolic array
 );
 
     localparam [3:0] S_IDLE=4'd0, S_WPRELOAD=4'd1, S_WREAD=4'd2, S_WLOAD=4'd3,
