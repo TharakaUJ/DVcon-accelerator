@@ -97,13 +97,13 @@ module accelerator #(
 
     // internal signals
     // axi master interface
-    logic rd_start, wr_start;
-    logic [ADDR_WIDTH-1:0] rd_addr, wr_addr;
-    logic [7:0] rd_len, wr_len;
-    logic [DATA_WIDTH-1:0] rd_data, wr_data;
-    logic rd_data_valid, wr_data_ready;
-    logic rd_done, wr_done;
-    logic rd_error, wr_error;
+    logic master_rd_start, master_wr_start;
+    logic [ADDR_WIDTH-1:0] master_rd_addr, master_wr_addr;
+    logic [7:0] master_rd_len, master_wr_len;
+    logic [DATA_WIDTH-1:0] master_rd_data, master_wr_data;
+    logic master_rd_data_valid, master_wr_data_ready;
+    logic master_rd_done, master_wr_done;
+    logic master_rd_error, master_wr_error;
 
     // axi slave interface
     logic start_pulse;
@@ -116,6 +116,43 @@ module accelerator #(
     logic [3:0] fsm_state;
 
 
+    // bram act buffer interface
+    logic act_wr_en, act_rd_en;
+    logic [4:0] act_wr_bank;
+    logic [9:0] act_wr_addr, act_rd_addr;
+    logic act_wr_buf, act_rd_buf;
+    logic act_rd_valid; // havent used yet
+
+
+
+    // bram weight buffer interface
+    logic wt_wr_en, wt_rd_en;
+    logic [4:0] wt_wr_row;
+    logic wt_wr_buf, wt_rd_buf;
+    logic wt_rd_valid; // havent used yet
+
+    // bram out buffer interface
+    logic out_rd_en;
+    logic [9:0] out_wr_addr, out_rd_addr; // need to wire the first one to the control unit
+    logic out_wr_buf, out_rd_buf; // need to wire the second one to the control unit
+    logic out_rd_valid; // havent used yet
+
+    // systolic array interface
+    logic array_en, array_clear_acc, array_weight_load; // need to wire these to the control unit
+    logic [DATA_WIDTH-1:0] systolic_array_act_in;
+    logic [DATA_WIDTH-1:0] systolic_array_weight_in;
+    logic [31:0] array_result_out;
+    logic array_result_valid; // havent used yet
+    logic [31:0] array_perf_cycles; // havent used yet
+    logic array_perf_valid;
+
+    // vector unit interface
+    logic [31:0] vector_bias;
+    logic [31:0] vector_requant_mult;
+    logic [31:0] vector_requant_shift;
+    logic [1:0] vector_act_type;
+    logic vector_out_valid; // havent used yet
+    logic [DATA_WIDTH-1:0] vector_unit_out;
 
     
     axi4_master #(
@@ -161,21 +198,22 @@ module accelerator #(
         .m_bvalid (m_axi_bvalid),
         .m_bready (m_axi_bready),
 
-        .rd_start (rd_start),
-        .rd_addr (rd_addr),
-        .rd_len (rd_len),
-        .rd_data (rd_data),
-        .rd_data_valid (rd_data_valid),
-        .rd_done (rd_done),
-        .rd_error (rd_error),
+        // wire internal signals
+        .rd_start (master_rd_start),
+        .rd_addr (master_rd_addr),
+        .rd_len (master_rd_len),
+        .rd_data (master_rd_data),
+        .rd_data_valid (master_rd_data_valid),
+        .rd_done (master_rd_done),
+        .rd_error (master_rd_error),
 
-        .wr_start (wr_start),
-        .wr_addr (wr_addr),
-        .wr_len (wr_len),
-        .wr_data (wr_data),
-        .wr_data_ready(wr_data_ready),
-        .wr_done (wr_done),
-        .wr_error (wr_error)
+        .wr_start (master_wr_start),
+        .wr_addr (master_wr_addr),
+        .wr_len (master_wr_len),
+        .wr_data (master_wr_data),
+        .wr_data_ready(master_wr_data_ready),
+        .wr_done (master_wr_done),
+        .wr_error (master_wr_error)
     );
 
 
@@ -209,6 +247,7 @@ module accelerator #(
         .s_rdata (s_axi_rdata),
         .s_rresp (s_axi_rresp),
 
+        // wire internal signals
         .start_pulse (start_pulse),
         .soft_reset (soft_reset),
         .src_addr (src_addr),
@@ -224,6 +263,130 @@ module accelerator #(
     );
 
 
-    
+    bram_act_buffer #(
+        .DATA_W(DATA_WIDTH),
+        .ACT_BANKS(32),
+        .ACT_DEPTH(1024)
+    ) u_bram_act_buffer (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+
+        .wr_en (act_wr_en),
+        .wr_buf (act_wr_buf),
+        .wr_bank (act_wr_bank),
+        .wr_addr (act_wr_addr),
+        .wr_data (master_rd_data),
+
+        .rd_en (act_rd_en),
+        .rd_buf (act_rd_buf),
+        .rd_addr (act_rd_addr),
+        .rd_data (systolic_array_act_in),
+        .rd_valid (act_rd_valid)
+    );
+
+    bram_weight_buffer #(
+        .DATA_W(DATA_WIDTH),
+        .ROWS(32),
+        .COLS(32),
+        .SLOTS(1)
+    ) u_bram_weight_buffer (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .wr_en (wt_wr_en),
+        .wr_buf (wt_wr_buf),
+        .wr_row (wt_wr_row),
+        .wr_row_data (master_rd_data),
+        .rd_en (wt_rd_en),
+        .rd_buf (wt_rd_buf),
+        .weight_data (systolic_array_weight_in),
+        .rd_valid (wt_rd_valid)
+    );
+
+    bram_out_buffer #(
+        .DATA_W(DATA_WIDTH),
+        .OC_LANES(32),
+        .OUT_DEPTH(1024)
+    ) u_bram_out_buffer (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .wr_en (1'b1), // always write to output buffer
+        .wr_buf (out_wr_buf),
+        .wr_addr (out_wr_addr),
+        .wr_vec (vector_unit_out),
+        .rd_en (out_rd_en),
+        .rd_buf (out_rd_buf),
+        .rd_addr (out_rd_addr),
+        .rd_vec (master_wr_data),
+        .rd_valid (out_rd_valid)
+    );
+
+    systolic_array #(
+        .ROWS(32),
+        .COLS(32)
+    ) u_systolic_array (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .en (array_en),
+        .clear_acc (array_clear_acc),
+        .weight_load(array_weight_load),
+        .weight_data(systolic_array_weight_in),
+        .act_in(systolic_array_act_in),
+        .result_out(array_result_out),
+        .result_valid(array_result_valid),
+        .perf_cycles(array_perf_cycles),
+        .perf_valid(array_perf_valid)
+    );
+
+    vector_unit #(
+        .SILU_SCALE(16.0)
+    ) u_vector_unit (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .acc(array_result_out),
+        .bias(vector_bias),
+        .requant_mult(vector_requant_mult),
+        .requant_shift(vector_requant_shift),
+        .act_type(vector_act_type),
+        .out_valid (vector_out_valid),
+        .q (vector_unit_out)
+    );
+
+    control_unit #(
+        .ARRAY_SIZE(32),
+        .ACT_DEPTH(1024),
+        .OUT_DEPTH(1024)
+    ) u_control_unit (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .start_pulse (start_pulse),
+        .soft_reset (soft_reset),
+        .perf_valid (array_perf_valid),
+        .num_acts (num_acts),
+        .busy (busy),
+        .done (done),
+        .fsm_state (fsm_state),
+
+        .loading_weights (loading_weights),
+        .streaming_acts (streaming_acts),
+
+
+        .wt_wr_en (wt_wr_en),
+        .wt_wr_row (wt_wr_row),
+        .wt_wr_buf (wt_wr_buf),
+        .wt_rd_en (wt_rd_en),
+        .wt_rd_buf (wt_rd_buf),
+        .weight_swap (weight_swap),
+
+        .act_wr_en (act_wr_en),
+        .act_wr_bank (act_wr_bank),
+        .act_wr_addr (act_wr_addr),
+        .act_wr_buf (act_wr_buf),
+        .act_rd_en (act_rd_en),
+        .act_rd_addr (act_rd_addr),
+        .act_rd_buf (act_rd_buf),
+        .out_rd_en (out_rd_en),
+        .out_rd_addr (out_rd_addr),
+        .out_wr_buf(out_wr_buf)
+    );
 
 endmodule
