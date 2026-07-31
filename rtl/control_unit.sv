@@ -1,30 +1,3 @@
-// =============================================================================
-// control_unit.sv  —  Sequencing FSM for the BRAM/DSP accelerator datapath
-// =============================================================================
-//
-//  Standalone "Control Unit" block (per the architecture diagram): owns the run
-//  sequence and emits every datapath strobe/counter. system_top wires the data
-//  (weight-row packing, activation bytes) around it.
-//
-//  Sequence (CR-2 retires the old LOADW/WPULSE):
-//      IDLE → WPRELOAD → WREAD → WLOAD → WSWAP → AWRITE → ASTREAM → COMPUTE
-//          → DRAIN → DONE
-//
-//      WPRELOAD : write ARRAY_SIZE weight rows into the weight BRAM (1/cycle)
-//      WREAD    : issue tile read from weight BRAM (data valid next cycle)
-//      WLOAD    : wt_rd_valid high → array latches tile into its SHADOW regs
-//      WSWAP    : 1-cycle shadow→active swap (0-stall fast load)
-//      AWRITE   : stage activations into BRAM (ARRAY_SIZE banks per vector)
-//      ASTREAM  : stream activation vectors into the array (1/cycle)
-//      COMPUTE  : wait for the array + requant pipe to drain (perf_valid)
-//      DRAIN    : read INT8 results out of the output BRAM
-//      DONE     : hold until soft_reset
-//
-//  Strobes are COMBINATIONAL decodes of state so they stay aligned with the
-//  registered counters (no 1-cycle skew). Counters are exposed so the parent
-//  can address the BRAMs and pack the matching data.
-// =============================================================================
-
 `timescale 1ns/1ps
 
 module control_unit #(
@@ -33,7 +6,9 @@ module control_unit #(
     parameter integer OUT_DEPTH  = 1024,
     parameter integer ACT_AW     = $clog2(ACT_DEPTH),
     parameter integer OUT_AW     = $clog2(OUT_DEPTH),
-    parameter integer BANK_W     = $clog2(ARRAY_SIZE)
+    parameter integer BANK_W     = $clog2(ARRAY_SIZE),
+    parameter integer INSTR_WINDOW_SIZE = 16,
+    parameter integer INSTR_WIDTH = 24
 )(
     input  wire                  clk,
     input  wire                  rst_n,
@@ -69,94 +44,287 @@ module control_unit #(
     // ── Output BRAM control ──────────────────────────────────────────────────
     output wire                  out_rd_en,
     output wire [OUT_AW-1:0]     out_rd_addr,
-    output wire                  out_rd_buf, // havent wired this yet, but will be needed for the output buffer
-    output wire                  out_wr_en, // havent wired this yet, but will be needed for the output buffer
-    output wire [OUT_AW-1:0]     out_wr_addr, // havent wired this yet, but will be needed for the output buffer
+    output wire                  out_rd_buf,
+    output wire                  out_wr_en,
+    output wire [OUT_AW-1:0]     out_wr_addr,
     output wire                  out_wr_buf,
 
     // ── Systolic Array control ────────────────────────────────────────────────
-    output wire                  array_en, // haven't wired this yet, but will be needed for the systolic array
-    output wire                  array_clear_acc, // haven't wired this yet, but will be needed for the systolic array
-    output wire                  array_weight_load, // haven't wired this yet, but will be needed for the systolic array
+    output wire                  array_en,
+    output wire                  array_clear_acc,
+    output wire                  array_weight_load,
+
+    // Instruction FIFO interface
+    output  wire                  fifo_pop_en,
+    output  wire [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx,
+    input  wire [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1]
 );
 
-    localparam [3:0] S_IDLE=4'd0, S_WPRELOAD=4'd1, S_WREAD=4'd2, S_WLOAD=4'd3,
-                     S_WSWAP=4'd4, S_AWRITE=4'd5, S_ASTREAM=4'd6, S_COMPUTE=4'd7,
-                     S_DRAIN=4'd8, S_DONE=4'd9;
 
-    reg [3:0]        state;
-    reg [15:0]       wrow;     // weight-row preload counter
-    reg [15:0]       abank;    // activation bank counter (per vector)
-    reg [15:0]       aaddr;    // activation vector index (write)
-    reg [15:0]       acnt;     // activation read/stream counter
-    reg [OUT_AW-1:0] dcnt;     // drain counter
-    reg              wbuf, abuf, obuf;
+    ///////////////////////////////////////////////////////////////////////////////
+    // Types
+    ///////////////////////////////////////////////////////////////////////////////
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || soft_reset) begin
-            state <= S_IDLE; wrow<=0; abank<=0; aaddr<=0; acnt<=0; dcnt<=0;
-            wbuf<=0; abuf<=0; obuf<=0;
-        end else begin
-            case (state)
-                S_IDLE: begin
-                    wrow<=0; abank<=0; aaddr<=0; acnt<=0; dcnt<=0;
-                    if (start_pulse) state <= S_WPRELOAD;
-                end
-                S_WPRELOAD:
-                    if (wrow == ARRAY_SIZE-1) begin wrow<=0; state<=S_WREAD; end
-                    else wrow <= wrow + 1;
-                S_WREAD:  state <= S_WLOAD;
-                S_WLOAD:  state <= S_WSWAP;
-                S_WSWAP:  state <= S_AWRITE;
-                S_AWRITE:
-                    if (abank == ARRAY_SIZE-1) begin
-                        abank <= 0;
-                        if (aaddr == num_acts-1) begin aaddr<=0; state<=S_ASTREAM; end
-                        else aaddr <= aaddr + 1;
-                    end else abank <= abank + 1;
-                S_ASTREAM:
-                    if (acnt == num_acts-1) begin acnt<=0; state<=S_COMPUTE; end
-                    else acnt <= acnt + 1;
-                S_COMPUTE: if (perf_valid) begin state<=S_DRAIN; dcnt<=0; end
-                S_DRAIN:
-                    if (dcnt == num_acts-1) state <= S_DONE;
-                    else dcnt <= dcnt + 1'b1;
-                S_DONE: ;
-                default: state <= S_IDLE;
+    typedef enum logic [3:0] {
+        OP_NOP,
+        OP_LOAD_WGT,
+        OP_LOAD_ACT,
+        OP_MATMUL,
+        OP_VECTOR,
+        OP_STORE,
+        OP_SWAP_WGT,
+        OP_END
+    } opcode_t;
+
+    typedef enum logic [1:0] {
+        BUF_EMPTY,
+        BUF_FILLING,
+        BUF_READY,
+        BUF_IN_USE
+    } buffer_state_t;
+
+    typedef enum logic {
+        ENG_IDLE,
+        ENG_BUSY
+    } engine_state_t;
+
+
+    localparam int INSTR_OPCODE_LSB = 0;
+    localparam int INSTR_OPCODE_MSB = 3;
+    localparam int INSTR_SRC_LSB    = 4;
+    localparam int INSTR_SRC_MSB    = 5;
+    localparam int INSTR_DST_LSB    = 6;
+    localparam int INSTR_DST_MSB    = 7;
+    localparam int INSTR_ADDR_LSB   = 8;
+    localparam int INSTR_ADDR_MSB   = 15;
+    localparam int INSTR_LENGTH_LSB = 16;
+    localparam int INSTR_LENGTH_MSB = 23;
+
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Scoreboard
+    ///////////////////////////////////////////////////////////////////////////////
+
+    buffer_state_t act_buf_state[2];
+    buffer_state_t out_buf_state[2];
+    buffer_state_t wgt_buf_state;
+
+    engine_state_t dma_rd_state;
+    engine_state_t dma_wr_state;
+    engine_state_t array_state;
+    engine_state_t vector_state;
+
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Issue signals
+    ///////////////////////////////////////////////////////////////////////////////
+
+    logic issue_valid;
+    logic [$clog2(INSTR_WINDOW_SIZE)-1:0] issue_index;
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Dependency checker
+    ///////////////////////////////////////////////////////////////////////////////
+
+    function automatic logic can_issue_load_act(
+        input logic [INSTR_WIDTH-1:0] inst
+    );
+
+        return
+            dma_rd_state == ENG_IDLE &&
+            act_buf_state[inst[INSTR_DST_MSB:INSTR_DST_LSB]] == BUF_EMPTY;
+
+    endfunction
+
+
+    function automatic logic can_issue_matmul(
+        input logic [INSTR_WIDTH-1:0] inst
+    );
+
+        return
+            array_state == ENG_IDLE &&
+            wgt_buf_state == BUF_READY &&
+            act_buf_state[inst[INSTR_SRC_MSB:INSTR_SRC_LSB]] == BUF_READY &&
+            out_buf_state[inst[INSTR_DST_MSB:INSTR_DST_LSB]] == BUF_EMPTY;
+
+    endfunction
+
+
+    function automatic logic can_issue_store(
+        input logic [INSTR_WIDTH-1:0] inst
+    );
+
+        return
+            dma_wr_state == ENG_IDLE &&
+            out_buf_state[inst[INSTR_SRC_MSB:INSTR_SRC_LSB]] == BUF_READY;
+
+    endfunction
+
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Scheduler
+    ///////////////////////////////////////////////////////////////////////////////
+
+    integer i;
+
+    always_comb begin
+
+        issue_valid = 1'b0;
+        issue_index = '0;
+
+        start_dma_rd = 0;
+        start_dma_wr = 0;
+        start_array  = 0;
+        start_vector = 0;
+
+        //----------------------------------------------------------
+        // Scan instruction window
+        //----------------------------------------------------------
+
+        for(i=0;i<INSTR_WINDOW_SIZE;i++) begin
+
+            unique case(fifo_window[i][INSTR_OPCODE_MSB:INSTR_OPCODE_LSB])
+
+                OP_LOAD_ACT:
+
+                    if(can_issue_load_act(fifo_window[i])) begin
+
+                        issue_valid = 1;
+                        issue_index = i;
+
+                        start_dma_rd = 1;
+
+                        break;
+                    end
+
+                OP_MATMUL:
+
+                    if(can_issue_matmul(fifo_window[i])) begin
+
+                        issue_valid = 1;
+                        issue_index = i;
+
+                        start_array = 1;
+
+                        break;
+                    end
+
+                OP_STORE:
+
+                    if(can_issue_store(fifo_window[i])) begin
+
+                        issue_valid = 1;
+                        issue_index = i;
+
+                        start_dma_wr = 1;
+
+                        break;
+                    end
+
             endcase
+
         end
+
     end
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin busy<=0; done<=0; fsm_state<=0; end
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Scoreboard update
+    ///////////////////////////////////////////////////////////////////////////////
+
+    always_ff @(posedge clk) begin
+
+        if(!rst_n) begin
+
+            act_buf_state[0] <= BUF_EMPTY;
+            act_buf_state[1] <= BUF_EMPTY;
+
+            out_buf_state[0] <= BUF_EMPTY;
+            out_buf_state[1] <= BUF_EMPTY;
+
+            wgt_buf_state <= BUF_EMPTY;
+
+            dma_rd_state <= ENG_IDLE;
+            dma_wr_state <= ENG_IDLE;
+            array_state  <= ENG_IDLE;
+            vector_state <= ENG_IDLE;
+
+        end
+
         else begin
-            busy      <= (state!=S_IDLE) && (state!=S_DONE);
-            done      <= (state==S_DONE);
-            fsm_state <= state;
+
+            //------------------------------------------------------
+            // Reserve resources immediately after issue
+            //------------------------------------------------------
+
+            if(issue_valid) begin
+
+                unique case(fifo_window[issue_index][INSTR_OPCODE_MSB:INSTR_OPCODE_LSB])
+
+                    OP_LOAD_ACT: begin
+
+                        dma_rd_state <= ENG_BUSY;
+                        act_buf_state[fifo_window[issue_index][INSTR_DST_MSB:INSTR_DST_LSB]]
+                            <= BUF_FILLING;
+
+                    end
+
+                    OP_MATMUL: begin
+
+                        array_state <= ENG_BUSY;
+
+                        act_buf_state[fifo_window[issue_index][INSTR_SRC_MSB:INSTR_SRC_LSB]]
+                            <= BUF_IN_USE;
+
+                        out_buf_state[fifo_window[issue_index][INSTR_DST_MSB:INSTR_DST_LSB]]
+                            <= BUF_IN_USE;
+
+                    end
+
+                    OP_STORE: begin
+
+                        dma_wr_state <= ENG_BUSY;
+
+                        out_buf_state[fifo_window[issue_index][INSTR_SRC_MSB:INSTR_SRC_LSB]]
+                            <= BUF_IN_USE;
+
+                    end
+
+                endcase
+
+            end
+
+            //------------------------------------------------------
+            // Completion events
+            //------------------------------------------------------
+
+            if(dma_rd_done) begin
+
+                dma_rd_state <= ENG_IDLE;
+
+                // Which buffer completed?
+                // (Real design stores transaction context)
+            end
+
+            if(array_done) begin
+
+                array_state <= ENG_IDLE;
+
+                // Activation buffer becomes EMPTY
+                // Output buffer becomes READY
+            end
+
+            if(dma_wr_done) begin
+
+                dma_wr_state <= ENG_IDLE;
+
+                // Output buffer becomes EMPTY
+            end
+
         end
+
     end
+    
 
-    // Combinational strobe decode (aligned with registered counters)
-    assign loading_weights = (state == S_WPRELOAD);
-    assign streaming_acts  = (state == S_ASTREAM);
-
-    assign wt_wr_en   = (state == S_WPRELOAD);
-    assign wt_wr_row  = wrow[BANK_W-1:0];
-    assign wt_wr_buf  = wbuf;
-    assign wt_rd_en   = (state == S_WREAD);
-    assign wt_rd_buf  = wbuf;
-    assign weight_swap= (state == S_WSWAP);
-
-    assign act_wr_en  = (state == S_AWRITE);
-    assign act_wr_bank= abank[BANK_W-1:0];
-    assign act_wr_addr= aaddr[ACT_AW-1:0];
-    assign act_wr_buf = abuf;
-    assign act_rd_en  = (state == S_ASTREAM);
-    assign act_rd_addr= acnt[ACT_AW-1:0];
-    assign act_rd_buf = abuf;
-
-    assign out_rd_en  = (state == S_DRAIN);
-    assign out_rd_addr= dcnt;
-    assign out_wr_buf = obuf;
 
 endmodule

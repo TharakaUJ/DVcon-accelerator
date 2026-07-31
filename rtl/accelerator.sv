@@ -2,7 +2,8 @@
 
 module accelerator #(
     parameter int DATA_WIDTH = 8,
-    parameter int ADDR_WIDTH = 32
+    parameter int ADDR_WIDTH = 32,
+    parameter int INSTR_WINDOW_SIZE = 16,
 )(
     // axi master
     output logic m_axi_awvalid,
@@ -146,6 +147,8 @@ module accelerator #(
     logic [31:0] array_perf_cycles; // havent used yet
     logic array_perf_valid;
 
+    localparam int INSTR_WIDTH = 24;
+
     // vector unit interface
     logic [31:0] vector_bias; // have to wire thise. define a new memory may be
     logic [31:0] vector_requant_mult; // have to wire this. define a new memory may be
@@ -153,6 +156,11 @@ module accelerator #(
     logic [1:0] vector_act_type;
     logic vector_out_valid; // havent used yet
     logic [DATA_WIDTH-1:0] vector_unit_out;
+
+    // instruction fifo interface
+    logic fifo_pop_en;
+    logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx;
+    logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
 
     
     axi4_master #(
@@ -354,20 +362,21 @@ module accelerator #(
     control_unit #(
         .ARRAY_SIZE(32),
         .ACT_DEPTH(1024),
-        .OUT_DEPTH(1024)
+        .OUT_DEPTH(1024),
+        .INSTR_WINDOW_SIZE(INSTR_WINDOW_SIZE)
     ) u_control_unit (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
         .start_pulse (start_pulse),
         .soft_reset (soft_reset),
         .perf_valid (array_perf_valid),
-        .num_acts (num_acts),
+        .num_acts (num_acts), // haven't defined
         .busy (busy),
         .done (done),
         .fsm_state (fsm_state),
 
-        .loading_weights (loading_weights),
-        .streaming_acts (streaming_acts),
+        .loading_weights (loading_weights), // haven't defined
+        .streaming_acts (streaming_acts), // haven't defined
 
 
         .wt_wr_en (wt_wr_en),
@@ -375,7 +384,7 @@ module accelerator #(
         .wt_wr_buf (wt_wr_buf),
         .wt_rd_en (wt_rd_en),
         .wt_rd_buf (wt_rd_buf),
-        .weight_swap (weight_swap),
+        .weight_swap (weight_swap), // haven't defined
 
         .act_wr_en (act_wr_en),
         .act_wr_bank (act_wr_bank),
@@ -393,7 +402,24 @@ module accelerator #(
 
         .array_en (array_en),
         .array_clear_acc (array_clear_acc),
-        .array_weight_load (array_weight_load)
+        .array_weight_load (array_weight_load),
+
+        .fifo_pop_en (fifo_pop_en),
+        .fifo_pop_idx (fifo_pop_idx),
+        .fifo_window (fifo_window)
+    );
+
+    instruction_fifo_window #(
+        .INSTR_WIDTH(INSTR_WIDTH),
+        .INSTR_DEPTH(16),
+        .WINDOW_SIZE(INSTR_WINDOW_SIZE)
+    ) u_instruction_fifo (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .pop_en (fifo_pop_en),
+        .pop_idx (fifo_pop_idx),
+        .window (fifo_window)
     );
 
 endmodule
+instruction_window
