@@ -7,7 +7,7 @@
 
 module axi4_lite_slave #(
     parameter int ADDR_WIDTH = 64,
-    parameter int DATA_WIDTH = 32
+    parameter int DATA_WIDTH = 64
 )(
     input  logic                    clk,
     input  logic                    rst_n,
@@ -42,11 +42,11 @@ module axi4_lite_slave #(
     // ── Accelerator control outputs ───────────────────────────────────────────
     output logic                    start_pulse,
     output logic                    soft_reset,
-    output logic [31:0]             src_addr,
-    output logic [31:0]             dst_addr,
+    output logic [ADDR_WIDTH-1:0]   src_addr,
+    output logic [ADDR_WIDTH-1:0]   dst_addr,
     output logic [15:0]             img_rows,
     output logic [15:0]             img_cols,
-    output logic [31:0]             weight_addr,
+    output logic [ADDR_WIDTH-1:0]   weight_addr,
 
     // ── Accelerator status inputs ─────────────────────────────────────────────
     input  logic                    busy,

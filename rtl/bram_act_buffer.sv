@@ -39,7 +39,7 @@ module bram_act_buffer #(
     input  wire                       wr_buf,         // ping-pong half select
     input  wire [$clog2(ACT_BANKS)-1:0] wr_bank,
     input  wire [ADDR_W-1:0]          wr_addr,
-    input  wire signed [DATA_W-1:0]   wr_data,
+    input  wire signed [63:0]   wr_data,
 
     // ── Read port (to skew network) ──────────────────────────────────────────
     input  wire                       rd_en,
@@ -60,9 +60,12 @@ module bram_act_buffer #(
 
             // Write port (synchronous)
             always @(posedge clk) begin
-                if (bank_wr) begin
-                    if (wr_buf == 1'b0) mem0[wr_addr] <= wr_data;
-                    else                mem1[wr_addr] <= wr_data;
+                if (bank_wr) begin: bank_write_block
+                    integer i;
+                    for (i = 0; i < DATA_W; i = i + 1) begin
+                        if (wr_buf == 1'b0) mem0[wr_addr+i] <= wr_data[DATA_W*i +: DATA_W];
+                        else                mem1[wr_addr+i] <= wr_data[DATA_W*i +: DATA_W];
+                    end
                 end
             end
 

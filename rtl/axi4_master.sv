@@ -8,7 +8,7 @@
 module axi4_master #(
     parameter int ADDR_WIDTH = 64,
     parameter int DATA_WIDTH = 64,
-    parameter int ID_WIDTH   = 4
+    parameter int ID_WIDTH   = 12
 )(
     input  logic clk,
     input  logic rst_n,

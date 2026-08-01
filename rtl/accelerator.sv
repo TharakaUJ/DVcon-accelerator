@@ -2,8 +2,9 @@
 
 module accelerator #(
     parameter int DATA_WIDTH = 8,
-    parameter int ADDR_WIDTH = 32,
-    parameter int INSTR_WINDOW_SIZE = 16,
+    parameter int ADDR_WIDTH = 64,
+    parameter int INSTR_WINDOW_SIZE = 4,
+    parameter int SYSTOLIC_ARRAY_ROWS = 32
 )(
     // axi master
     output logic m_axi_awvalid,
@@ -64,7 +65,7 @@ module accelerator #(
     input logic s_axi_awvalid,
     output logic s_axi_awready,
 
-    input logic s_axi_wdata,
+    input logic [63:0] s_axi_wdata,
     input logic [7:0] s_axi_wstrb,
     input logic s_axi_wlast,
     input logic s_axi_wvalid,
@@ -101,7 +102,7 @@ module accelerator #(
     logic master_rd_start, master_wr_start;
     logic [ADDR_WIDTH-1:0] master_rd_addr, master_wr_addr;
     logic [7:0] master_rd_len, master_wr_len;
-    logic [DATA_WIDTH-1:0] master_rd_data, master_wr_data;
+    logic [63:0] master_rd_data, master_wr_data;
     logic master_rd_data_valid, master_wr_data_ready;
     logic master_rd_done, master_wr_done;
     logic master_rd_error, master_wr_error;
@@ -110,7 +111,7 @@ module accelerator #(
     logic start_pulse;
     logic soft_reset;
     logic [ADDR_WIDTH-1:0] src_addr, dst_addr;
-    logic [31:0] img_rows, img_cols;
+    logic [15:0] img_rows, img_cols;
     logic [ADDR_WIDTH-1:0] weight_addr;
     logic [31:0] weight_size;
     logic busy, done, error;
@@ -120,7 +121,7 @@ module accelerator #(
     // bram act buffer interface
     logic act_wr_en, act_rd_en;
     logic [4:0] act_wr_bank;
-    logic [9:0] act_wr_addr, act_rd_addr;
+    logic [4:0] act_wr_addr, act_rd_addr;
     logic act_wr_buf, act_rd_buf;
     logic act_rd_valid; // havent used yet
 
@@ -134,18 +135,21 @@ module accelerator #(
 
     // bram out buffer interface
     logic out_rd_en;
+    logic out_wr_en;
     logic [9:0] out_wr_addr, out_rd_addr;
     logic out_wr_buf, out_rd_buf;
     logic out_rd_valid; // havent used yet
 
     // systolic array interface
     logic array_en, array_clear_acc, array_weight_load;
-    logic [DATA_WIDTH-1:0] systolic_array_act_in;
-    logic [DATA_WIDTH-1:0] systolic_array_weight_in;
+    logic [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
+    logic [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
     logic [31:0] array_result_out;
     logic array_result_valid; // havent used yet
     logic [31:0] array_perf_cycles; // havent used yet
     logic array_perf_valid;
+
+    logic [15:0] num_acts;
 
     localparam int INSTR_WIDTH = 24;
 
@@ -162,11 +166,11 @@ module accelerator #(
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx;
     logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
 
+    // control unit interface
+    logic loading_weights, streaming_acts, weight_swap;
+
     
-    axi4_master #(
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .DATA_WIDTH(DATA_WIDTH)
-    ) u_axi4_master (
+    axi4_master u_axi4_master (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
 
@@ -226,10 +230,7 @@ module accelerator #(
 
 
 
-    axi4_lite_slave #(
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .DATA_WIDTH(DATA_WIDTH)
-    ) u_axi4_lite_slave (
+    axi4_lite_slave u_axi4_lite_slave (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
 
@@ -317,7 +318,7 @@ module accelerator #(
     ) u_bram_out_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
-        .wr_en (1'b1), // always write to output buffer
+        .wr_en (out_wr_en),
         .wr_buf (out_wr_buf),
         .wr_addr (out_wr_addr),
         .wr_vec (vector_unit_out),
@@ -329,8 +330,8 @@ module accelerator #(
     );
 
     systolic_array #(
-        .ROWS(32),
-        .COLS(32)
+        .ROWS(SYSTOLIC_ARRAY_ROWS),
+        .COLS(SYSTOLIC_ARRAY_ROWS)
     ) u_systolic_array (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -370,6 +371,10 @@ module accelerator #(
         .start_pulse (start_pulse),
         .soft_reset (soft_reset),
         .perf_valid (array_perf_valid),
+        .dma_rd_done (master_rd_done),
+        .dma_wr_done (master_wr_done),
+        .array_done (array_perf_valid),
+        .vector_done (vector_out_valid),
         .num_acts (num_acts), // haven't defined
         .busy (busy),
         .done (done),
@@ -396,9 +401,9 @@ module accelerator #(
         .out_rd_en (out_rd_en),
         .out_rd_addr (out_rd_addr),
         .out_rd_buf (out_rd_buf),
+        .out_wr_en (out_wr_en),
         .out_wr_buf(out_wr_buf),
         .out_wr_addr(out_wr_addr),
-        // .out_wr_en(out_wr_en),
 
         .array_en (array_en),
         .array_clear_acc (array_clear_acc),
@@ -422,4 +427,3 @@ module accelerator #(
     );
 
 endmodule
-instruction_window

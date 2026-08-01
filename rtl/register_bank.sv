@@ -54,8 +54,12 @@ module register_bank #(
                 end
             end
         end else begin : gen_hide
-            assign connect_wires_out = '0;
+            for (genvar i = 0; i < $size(connect_wires_out); i++) begin : gen_zero_array
+                assign connect_wires_out[i] = '0;
+            end
         end
+
+
     endgenerate
 
 endmodule
