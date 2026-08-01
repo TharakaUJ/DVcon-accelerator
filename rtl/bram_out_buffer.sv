@@ -55,7 +55,7 @@ module bram_out_buffer #(
             end
             always @(posedge clk) begin
                 if (rd_en)
-                    rd_vec[l] <= (rd_buf == 1'b0) ? mem0[rd_addr] : mem1[rd_addr];
+                    rd_vec[l*DATA_W +: DATA_W] <= (rd_buf == 1'b0) ? mem0[rd_addr] : mem1[rd_addr];
             end
         end
     endgenerate

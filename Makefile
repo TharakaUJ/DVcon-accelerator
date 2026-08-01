@@ -56,7 +56,7 @@ dirs:
 
 sim: dirs
 	@echo "=== Compiling ==="
-	$(IVERILOG) $(FLAGS) -o $(SIMOUT) $(SRCS) |& grep -v "^:0: sorry:"
+	$(IVERILOG) $(FLAGS) -o $(SIMOUT) $(SRCS)
 	@echo "=== Simulating ==="
 	$(VVP) $(SIMOUT)
 
@@ -83,7 +83,7 @@ wave: $(WAVEFILE)
 	fi
 
 lint: dirs
-	$(IVERILOG) $(FLAGS) -tnull $(SRCS) |& grep -v "^:0: sorry:"
+	$(IVERILOG) $(FLAGS) -tnull $(SRCS)
 	@echo "Lint clean."
 
 clean:
@@ -104,6 +104,6 @@ init:
 reinit:
 	@echo "Reinitializing the project..."
 	rm -r DVCon_2026
-	$(MAKE) setup
+	$(MAKE) init
 	
 	

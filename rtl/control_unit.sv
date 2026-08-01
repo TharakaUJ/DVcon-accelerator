@@ -41,18 +41,18 @@ module control_unit #(
     // ── Activation BRAM control ──────────────────────────────────────────────
     output logic                 act_wr_en,
     output logic [BANK_W-1:0]    act_wr_bank,
-    output logic [ACT_AW-1:0]    act_wr_addr,
+    output logic [6:0]    act_wr_addr,
     output logic                 act_wr_buf,
     output logic                 act_rd_en,
-    output logic [ACT_AW-1:0]    act_rd_addr,
+    output logic [4:0]    act_rd_addr,
     output logic                 act_rd_buf,
 
     // ── Output BRAM control ──────────────────────────────────────────────────
     output logic                 out_rd_en,
-    output logic [OUT_AW-1:0]    out_rd_addr,
+    output logic [6:0]    out_rd_addr,
     output logic                 out_rd_buf,
     output logic                 out_wr_en,
-    output logic [OUT_AW-1:0]    out_wr_addr,
+    output logic [4:0]    out_wr_addr,
     output logic                 out_wr_buf,
 
     // ── Systolic Array control ────────────────────────────────────────────────
