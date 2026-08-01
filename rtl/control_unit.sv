@@ -4,6 +4,8 @@ module control_unit #(
     parameter integer ARRAY_SIZE = 16,
     parameter integer ACT_DEPTH  = 512,
     parameter integer OUT_DEPTH  = 1024,
+    parameter integer DATA_WIDTH = 8,
+    parameter integer DMA_WIDTH = 64,
     parameter integer ACT_AW     = $clog2(ACT_DEPTH),
     parameter integer OUT_AW     = $clog2(OUT_DEPTH),
     parameter integer BANK_W     = $clog2(ARRAY_SIZE),
@@ -148,24 +150,6 @@ module control_unit #(
     ///////////////////////////////////////////////////////////////////////////////
     // Dependency checker
     ///////////////////////////////////////////////////////////////////////////////
-
-    function automatic instruction_t decode_instruction(
-        input logic [INSTR_WIDTH-1:0] raw_inst
-    );
-
-        instruction_t decoded;
-
-        decoded.opcode = opcode_t'(raw_inst[3:0]);
-        decoded.src    = raw_inst[5:4];
-        decoded.dst    = raw_inst[7:6];
-        decoded.addr   = raw_inst[15:8];
-        decoded.length = raw_inst[23:16];
-
-        return decoded;
-
-    endfunction
-
-
     function automatic logic can_issue_load_wgt;
 
         return
@@ -281,7 +265,7 @@ module control_unit #(
             (array_state == ENG_BUSY);
 
         for(i = 0; i < INSTR_WINDOW_SIZE; i = i + 1) begin
-            decoded_window[i] = decode_instruction(fifo_window[i]);
+            decoded_window[i] = instruction_t'(fifo_window[i]);
         end
 
         // Scan the instruction window and select the first ready instruction.
@@ -300,7 +284,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -313,7 +297,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -326,7 +310,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -339,7 +323,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -352,7 +336,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -365,7 +349,7 @@ module control_unit #(
                             issue_packet.addr   = current_inst.addr;
                             issue_packet.length = current_inst.length;
                             issue_valid = 1'b1;
-                            issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                            issue_index = i;
                             already_selected = 1'b1;
                         end
 
@@ -377,7 +361,7 @@ module control_unit #(
                         issue_packet.addr   = current_inst.addr;
                         issue_packet.length = current_inst.length;
                         issue_valid = 1'b1;
-                        issue_index = i[$clog2(INSTR_WINDOW_SIZE)-1:0];
+                        issue_index = i;
                         already_selected = 1'b1;
                     end
 

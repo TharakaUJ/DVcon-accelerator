@@ -1,64 +1,59 @@
-// =============================================================================
-// bram_weight_buffer.sv  —  CR-2: BRAM weight staging, double-buffered, fast load
-// =============================================================================
-//
-//  On-chip staging for a ROWS×COLS INT8 weight tile streamed from DDR3 (weights
-//  do not all fit on-chip — §3). Organised as ROWS banks, each COLS×DATA_W wide,
-//  with SLOTS (=2) double-buffer half-banks. A single read returns the whole
-//  selected tile as the flat weight_data bus (ROWS×COLS INT8) which the array
-//  latches in one cycle (Option A wide load) or into its shadow regs (Option B
-//  hidden load).
-//
-//  Write granularity = one ROW word (COLS×DATA_W bits) per beat, so the DMA /
-//  loader assembles a row then writes it: (slot=wr_buf, row=wr_row).
-//  Read: pulse rd_en with rd_buf → weight_data registered 1 cycle later, rd_valid.
-//
-//  Synthesis: (* ram_style = "block" *) → RAMB.
-// =============================================================================
-
 `timescale 1ns/1ps
 
 module bram_weight_buffer #(
     parameter integer DATA_W = 8,
     parameter integer ROWS   = 16,
     parameter integer COLS   = 16,
-    parameter integer SLOTS  = 2,                  // double buffer
-    parameter integer ROW_W  = COLS*DATA_W,
-    parameter integer SLOT_W = (SLOTS>1) ? $clog2(SLOTS) : 1
+    parameter integer DMA_WIDTH = 64,
+    parameter integer ELEMENTS_PER_DMA = DMA_WIDTH / DATA_W,
+    parameter integer WR_ADDR_W = $clog2(COLS*ROWS / ELEMENTS_PER_DMA)  // chunk address within a row
 )(
     input  wire                          clk,
     input  wire                          rst_n,
 
-    // ── Write port: one row word per beat ────────────────────────────────────
+    // ── Write port: one DMA chunk (ELEMENTS_PER_DMA elements) per beat ───────
     input  wire                          wr_en,
-    input  wire [SLOT_W-1:0]             wr_buf,
     input  wire [$clog2(ROWS)-1:0]       wr_row,
-    input  wire [ROW_W-1:0]              wr_row_data,   // {W[row][COLS-1],...,W[row][0]}
+    input  wire [WR_ADDR_W-1:0]          wr_addr,   // chunk offset within the row
+    input  wire [DMA_WIDTH-1:0]          wr_data,   // {W[row][chunk*EPD+EPD-1],...,W[row][chunk*EPD]}
 
     // ── Read port: latch whole tile into the flat bus ────────────────────────
     input  wire                          rd_en,
-    input  wire [SLOT_W-1:0]             rd_buf,
     output reg  signed [DATA_W-1:0]      weight_data [0:ROWS*COLS-1],
     output reg                           rd_valid
 );
 
+    // Guard against a DMA_WIDTH that doesn't split evenly into DATA_W-wide elements
+    initial begin
+        if (DMA_WIDTH % DATA_W != 0)
+            $error("bram_weight_buffer: DMA_WIDTH (%0d) must be a multiple of DATA_W (%0d)", DMA_WIDTH, DATA_W);
+        if (COLS % ELEMENTS_PER_DMA != 0)
+            $error("bram_weight_buffer: COLS (%0d) must be a multiple of ELEMENTS_PER_DMA (%0d)", COLS, ELEMENTS_PER_DMA);
+    end
+
     genvar r, c;
     generate
         for (r = 0; r < ROWS; r = r + 1) begin : g_rowbank
-            // One BRAM per row, COLS×DATA_W wide, SLOTS deep (slot = address).
-            (* ram_style = "block" *) reg [ROW_W-1:0] mem [0:SLOTS-1];
+            // One BRAM per row, COLS deep, DATA_W wide (single buffer).
+            (* ram_style = "block" *) reg signed [DATA_W-1:0] mem [0:COLS-1];
 
             wire row_wr = wr_en && (wr_row == r);
             always @(posedge clk) begin
-                if (row_wr) mem[wr_buf] <= wr_row_data;
+                if (row_wr) begin: row_write_block
+                    integer i;
+                    // Loop bound must be the number of segments, NOT the width of the segment
+                    for (i = 0; i < ELEMENTS_PER_DMA; i = i + 1) begin
+                        mem[wr_addr * ELEMENTS_PER_DMA + i] <= wr_data[DATA_W*i +: DATA_W];
+                    end
+                end
             end
 
-            // Synchronous read: unpack the selected slot's row word straight into
-            // the registered flat weight bus (1-cycle latency).
+            // Synchronous read: unpack the entire row into the registered flat
+            // weight bus in one cycle (1-cycle latency) whenever rd_en fires.
             for (c = 0; c < COLS; c = c + 1) begin : g_unpack
                 always @(posedge clk) begin
                     if (rd_en)
-                        weight_data[r*COLS + c] <= $signed(mem[rd_buf][c*DATA_W +: DATA_W]);
+                        weight_data[r*COLS + c] <= mem[c];
                 end
             end
         end

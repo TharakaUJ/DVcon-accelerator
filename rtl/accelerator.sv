@@ -88,7 +88,7 @@ module accelerator #(
     input logic s_axi_arvalid,
     output logic s_axi_arready,
 
-    output logic s_axi_rready,
+    input  logic s_axi_rready,
     output logic s_axi_rid,
     output logic [63:0] s_axi_rdata,
     output logic [1:0] s_axi_rresp,
@@ -102,7 +102,8 @@ module accelerator #(
     logic master_rd_start, master_wr_start;
     logic [ADDR_WIDTH-1:0] master_rd_addr, master_wr_addr;
     logic [7:0] master_rd_len, master_wr_len;
-    logic [63:0] master_rd_data, master_wr_data;
+    logic [63:0] master_rd_data;
+    logic [63:0] master_wr_data;
     logic master_rd_data_valid, master_wr_data_ready;
     logic master_rd_done, master_wr_done;
     logic master_rd_error, master_wr_error;
@@ -121,7 +122,8 @@ module accelerator #(
     // bram act buffer interface
     logic act_wr_en, act_rd_en;
     logic [4:0] act_wr_bank;
-    logic [4:0] act_wr_addr, act_rd_addr;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] act_wr_addr;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] act_rd_addr;
     logic act_wr_buf, act_rd_buf;
     logic act_rd_valid; // havent used yet
 
@@ -129,23 +131,24 @@ module accelerator #(
 
     // bram weight buffer interface
     logic wt_wr_en, wt_rd_en;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] wt_wr_addr;
     logic [4:0] wt_wr_row;
-    logic wt_wr_buf, wt_rd_buf;
     logic wt_rd_valid; // havent used yet
 
     // bram out buffer interface
     logic out_rd_en;
     logic out_wr_en;
-    logic [9:0] out_wr_addr, out_rd_addr;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] out_rd_addr;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] out_wr_addr;
     logic out_wr_buf, out_rd_buf;
     logic out_rd_valid; // havent used yet
 
     // systolic array interface
     logic array_en, array_clear_acc, array_weight_load;
-    logic [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
-    logic [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
-    logic [31:0] array_result_out;
-    logic array_result_valid; // havent used yet
+    logic signed [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
+    logic signed [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
+    logic signed [31:0] array_result_out [0:SYSTOLIC_ARRAY_ROWS-1];
+    logic [31:0] array_result_valid; // havent used yet
     logic [31:0] array_perf_cycles; // havent used yet
     logic array_perf_valid;
 
@@ -154,12 +157,13 @@ module accelerator #(
     localparam int INSTR_WIDTH = 24;
 
     // vector unit interface
-    logic [31:0] vector_bias; // have to wire thise. define a new memory may be
-    logic [31:0] vector_requant_mult; // have to wire this. define a new memory may be
-    logic [31:0] vector_requant_shift; // have to wire this. define a new memory may be
+    logic vector_in_valid; // havent used yet
+    logic signed [31:0] vector_bias [0:SYSTOLIC_ARRAY_ROWS-1]; // have to wire thise. define a new memory may be
+    logic [15:0] vector_requant_mult; // have to wire this. define a new memory may be
+    logic [4:0] vector_requant_shift; // have to wire this. define a new memory may be
     logic [1:0] vector_act_type;
     logic vector_out_valid; // havent used yet
-    logic [DATA_WIDTH-1:0] vector_unit_out;
+    logic signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
 
     // instruction fifo interface
     logic fifo_pop_en;
@@ -274,8 +278,8 @@ module accelerator #(
 
     bram_act_buffer #(
         .DATA_W(DATA_WIDTH),
-        .ACT_BANKS(32),
-        .ACT_DEPTH(1024)
+        .ACT_BANKS(SYSTOLIC_ARRAY_ROWS),
+        .ACT_DEPTH(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS)
     ) u_bram_act_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -296,17 +300,15 @@ module accelerator #(
     bram_weight_buffer #(
         .DATA_W(DATA_WIDTH),
         .ROWS(32),
-        .COLS(32),
-        .SLOTS(1)
+        .COLS(32)
     ) u_bram_weight_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
         .wr_en (wt_wr_en),
-        .wr_buf (wt_wr_buf),
         .wr_row (wt_wr_row),
-        .wr_row_data (master_rd_data),
+        .wr_data (master_rd_data),
+        .wr_addr (wt_wr_addr),
         .rd_en (wt_rd_en),
-        .rd_buf (wt_rd_buf),
         .weight_data (systolic_array_weight_in),
         .rd_valid (wt_rd_valid)
     );
@@ -351,6 +353,7 @@ module accelerator #(
     ) u_vector_unit (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
+        .in_valid (vector_in_valid),
         .acc(array_result_out),
         .bias(vector_bias),
         .requant_mult(vector_requant_mult),
@@ -386,9 +389,7 @@ module accelerator #(
 
         .wt_wr_en (wt_wr_en),
         .wt_wr_row (wt_wr_row),
-        .wt_wr_buf (wt_wr_buf),
         .wt_rd_en (wt_rd_en),
-        .wt_rd_buf (wt_rd_buf),
         .weight_swap (weight_swap), // haven't defined
 
         .act_wr_en (act_wr_en),

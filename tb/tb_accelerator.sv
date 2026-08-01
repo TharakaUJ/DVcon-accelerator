@@ -79,7 +79,7 @@ module tb_accelerator;
     reg  [2:0] s_axi_awprot;
     reg  [3:0] s_axi_awqos;
     reg  s_axi_awvalid;
-    reg  s_axi_wdata;
+    reg  [63:0] s_axi_wdata;
     reg  [7:0] s_axi_wstrb;
     reg  s_axi_wlast;
     reg  s_axi_wvalid;
@@ -287,7 +287,6 @@ module tb_accelerator;
         $dumpfile("tb_accelerator.vcd");
         $dumpvars(0, tb_accelerator);
 
-        s_axi_aclk    = 0;
         s_axi_aresetn  = 0;
         s_axi_awaddr   = 64'd0;
         s_axi_awlen    = 8'd0;

@@ -19,7 +19,10 @@ module bram_out_buffer #(
     parameter integer DATA_W   = 8,
     parameter integer OC_LANES = 16,
     parameter integer OUT_DEPTH= 1024,                 // output positions per half
-    parameter integer ADDR_W   = $clog2(OUT_DEPTH)
+    parameter integer DMA_WIDTH = 64,
+    parameter integer ELEMENTS_PER_DMA = DMA_WIDTH / DATA_W,
+    parameter integer WR_ADDR_W = $clog2(OUT_DEPTH / OC_LANES),
+    parameter integer RD_ADDR_W = $clog2(OUT_DEPTH / ELEMENTS_PER_DMA)
 )(
     input  wire                       clk,
     input  wire                       rst_n,
@@ -27,14 +30,14 @@ module bram_out_buffer #(
     // ── Write a full output vector (from vector_unit) ────────────────────────
     input  wire                       wr_en,
     input  wire                       wr_buf,
-    input  wire [ADDR_W-1:0]          wr_addr,
+    input  wire [WR_ADDR_W-1:0]       wr_addr,
     input  wire signed [DATA_W-1:0]   wr_vec [0:OC_LANES-1],
 
     // ── Read a full output vector (drain) ────────────────────────────────────
     input  wire                       rd_en,
     input  wire                       rd_buf,
-    input  wire [ADDR_W-1:0]          rd_addr,
-    output reg  signed [DATA_W-1:0]   rd_vec [0:OC_LANES-1],
+    input  wire [RD_ADDR_W-1:0]       rd_addr,
+    output reg signed [DMA_WIDTH-1:0] rd_vec,
     output reg                        rd_valid
 );
 

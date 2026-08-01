@@ -1,0 +1,19 @@
+=== Compiling ===
+iverilog -g2012 -DSIMULATION -Irtl -Wall -o build/sim.vvp tb/tb_accelerator.sv rtl/control_unit.sv rtl/instructions_fifo.sv rtl/bram_act_buffer.sv rtl/axi4_lite_slave.sv rtl/pe.sv rtl/register_bank.sv rtl/generic_mux.sv rtl/systolic_array.sv rtl/bram_weight_buffer.sv rtl/buffer_reg.sv rtl/vector_unit.sv rtl/bram_out_buffer.sv rtl/silu_lut.sv rtl/shift_reg_buffer.sv rtl/axi4_master.sv rtl/accelerator.sv
+=== Simulating ===
+vvp build/sim.vvp
+VCD info: dumpfile tb_accelerator.vcd opened for output.
+  PASS               m_axi_awvalid idle got=0
+  PASS                m_axi_wvalid idle got=0
+  PASS               m_axi_arvalid idle got=0
+  PASS                ctrl default bit0 got=0
+  PASS             ctrl self-clear bit0 got=0
+  PASS                 status idle bit0 got=0
+  PASS                    src addr bit0 got=1
+  PASS                m_axi_awaddr idle got=0x0000000000000000
+
+==================================
+  ACCELERATOR SMOKE TB: Passed=8 Failed=0
+  ALL ACCELERATOR TESTS PASSED
+==================================
+tb/tb_accelerator.sv:353: $finish called at 260000 (1ps)

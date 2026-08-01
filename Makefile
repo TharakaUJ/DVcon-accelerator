@@ -56,7 +56,7 @@ dirs:
 
 sim: dirs
 	@echo "=== Compiling ==="
-	$(IVERILOG) $(FLAGS) -o $(SIMOUT) $(SRCS)
+	$(IVERILOG) $(FLAGS) -o $(SIMOUT) $(SRCS) |& grep -v "^:0: sorry:"
 	@echo "=== Simulating ==="
 	$(VVP) $(SIMOUT)
 
@@ -83,7 +83,7 @@ wave: $(WAVEFILE)
 	fi
 
 lint: dirs
-	$(IVERILOG) $(FLAGS) -tnull $(SRCS)
+	$(IVERILOG) $(FLAGS) -tnull $(SRCS) |& grep -v "^:0: sorry:"
 	@echo "Lint clean."
 
 clean:
