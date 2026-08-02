@@ -279,7 +279,7 @@ module accelerator #(
     bram_act_buffer #(
         .DATA_W(DATA_WIDTH),
         .ACT_BANKS(SYSTOLIC_ARRAY_ROWS),
-        .ACT_DEPTH(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS)
+        .ACT_DEPTH(SYSTOLIC_ARRAY_ROWS)
     ) u_bram_act_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -299,8 +299,8 @@ module accelerator #(
 
     bram_weight_buffer #(
         .DATA_W(DATA_WIDTH),
-        .ROWS(32),
-        .COLS(32)
+        .ROWS(SYSTOLIC_ARRAY_ROWS),
+        .COLS(SYSTOLIC_ARRAY_ROWS)
     ) u_bram_weight_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -315,8 +315,8 @@ module accelerator #(
 
     bram_out_buffer #(
         .DATA_W(DATA_WIDTH),
-        .OC_LANES(32),
-        .OUT_DEPTH(1024)
+        .OC_LANES(SYSTOLIC_ARRAY_ROWS),
+        .OUT_DEPTH(SYSTOLIC_ARRAY_ROWS)
     ) u_bram_out_buffer (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),

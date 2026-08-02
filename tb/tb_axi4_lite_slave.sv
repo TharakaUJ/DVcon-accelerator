@@ -10,7 +10,7 @@ module tb_axi4_lite_slave;
     // Parameters
     // =========================================================================
     localparam int ADDR_WIDTH = 64;
-    localparam int DATA_WIDTH = 32;
+    localparam int DATA_WIDTH = 64;
 
     // Register offsets
     localparam logic [7:0] REG_CTRL        = 8'h00;

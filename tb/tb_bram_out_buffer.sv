@@ -11,8 +11,8 @@ module tb_bram_out_buffer;
     localparam integer OUT_DEPTH = 32;
     localparam integer DMA_WIDTH = 32; // Matches 4 lanes * 8 bits
     localparam integer ELEMENTS_PER_DMA = DMA_WIDTH / DATA_W;
-    localparam integer WR_ADDR_W = $clog2(OUT_DEPTH / OC_LANES);
-    localparam integer RD_ADDR_W = $clog2(OUT_DEPTH / ELEMENTS_PER_DMA);
+    localparam integer WR_ADDR_W = $clog2(OUT_DEPTH);
+    localparam integer RD_ADDR_W = $clog2(OUT_DEPTH * OC_LANES / ELEMENTS_PER_DMA);
     localparam         CLK_PERIOD= 10;
 
     reg clk = 0; always #(CLK_PERIOD/2) clk = ~clk;
