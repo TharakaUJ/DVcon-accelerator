@@ -132,7 +132,6 @@ module accelerator #(
     // bram weight buffer interface
     logic wt_wr_en, wt_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] wt_wr_addr;
-    logic [4:0] wt_wr_row;
     logic wt_rd_valid; // havent used yet
 
     // bram out buffer interface
@@ -309,7 +308,6 @@ module accelerator #(
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
         .wr_en (wt_wr_en),
-        .wr_row (wt_wr_row),
         .wr_data (master_rd_data),
         .wr_addr (wt_wr_addr),
         .rd_en (wt_rd_en),
@@ -405,7 +403,7 @@ module accelerator #(
         .streaming_acts (streaming_acts),
 
         .wt_wr_en (wt_wr_en),
-        .wt_wr_row (wt_wr_row),
+        .wt_wr_addr (wt_wr_addr),
         .wt_rd_en (wt_rd_en),
 
         .act_wr_en (act_wr_en),

@@ -13,7 +13,6 @@ module bram_weight_buffer #(
 
     // ── Write port: one DMA chunk (ELEMENTS_PER_DMA elements) per beat ───────
     input  wire                          wr_en,
-    input  wire [$clog2(ROWS)-1:0]       wr_row,
     input  wire [WR_ADDR_W-1:0]          wr_addr,   // chunk offset within the row
     input  wire [DMA_WIDTH-1:0]          wr_data,   // {W[row][chunk*EPD+EPD-1],...,W[row][chunk*EPD]}
 
@@ -23,6 +22,11 @@ module bram_weight_buffer #(
     output reg                           rd_valid
 );
 
+    logic [$clog2(ROWS)-1:0]       wr_row;
+    logic [$clog2(COLS*DATA_W/ELEMENTS_PER_DMA)-1:0]       wr_col;
+
+    assign wr_row = wr_addr / (COLS * DATA_W / ELEMENTS_PER_DMA);
+    assign wr_col = wr_addr % (COLS * DATA_W / ELEMENTS_PER_DMA);
     // Guard against a DMA_WIDTH that doesn't split evenly into DATA_W-wide elements
     initial begin
         if (DMA_WIDTH % DATA_W != 0)
@@ -43,7 +47,7 @@ module bram_weight_buffer #(
                     integer i;
                     // Loop bound must be the number of segments, NOT the width of the segment
                     for (i = 0; i < ELEMENTS_PER_DMA; i = i + 1) begin
-                        mem[wr_addr * ELEMENTS_PER_DMA + i] <= wr_data[DATA_W*i +: DATA_W];
+                        mem[wr_col * ELEMENTS_PER_DMA + i] <= wr_data[DATA_W*i +: DATA_W];
                     end
                 end
             end

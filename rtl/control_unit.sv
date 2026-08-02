@@ -51,7 +51,7 @@ module control_unit #(
 
     // ── Weight BRAM control ──────────────────────────────────────────────────
     output logic                 wt_wr_en,
-    output logic [BANK_W-1:0]    wt_wr_row,
+    output logic [ACT_AW-1:0]    wt_wr_addr,
     output logic                 wt_rd_en,
     output logic                 wt_rd_buf,
 
@@ -82,14 +82,6 @@ module control_unit #(
     output logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx,
     input  logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1]
 );
-
-    // NOTE ON ADDRESS WIDTHS:
-    // act_rd_addr/out_wr_addr are now sized [BANK_W-1:0] (row-within-array
-    // index, matches the systolic array's per-row read used during MATMUL/
-    // VECTOR), while act_wr_addr/out_rd_addr are sized [ACT_AW-1:0]/[OUT_AW-1:0]
-    // (flat BRAM address used during DMA fill/drain). Previously these were
-    // hardcoded to [4:0]/[6:0] regardless of ARRAY_SIZE/ARRAY_SIZE/OUT_DEPTH,
-    // which happened to work only for the current parameter values.
 
     ///////////////////////////////////////////////////////////////////////////////
     // Types
@@ -204,11 +196,11 @@ module control_unit #(
             out_buf_state[src] == BUF_READY;
     endfunction
 
-    function automatic logic can_issue_swap_wgt;
-        return
-            wgt_buf_state == BUF_READY &&
-            array_state == ENG_IDLE;
-    endfunction
+    // function automatic logic can_issue_swap_wgt;
+    //     return
+    //         wgt_buf_state == BUF_READY &&
+    //         array_state == ENG_IDLE;
+    // endfunction
 
     function automatic logic can_issue_vector(
         input logic [1:0] src,
@@ -238,7 +230,7 @@ module control_unit #(
         fifo_pop_idx = '0;
 
         wt_wr_en = 1'b0;
-        wt_wr_row = '0;
+        wt_wr_addr = '0;
         wt_rd_en = 1'b0;
         wt_rd_buf = 1'b0;
 
@@ -309,6 +301,19 @@ module control_unit #(
                             issue_index = i;
                             already_selected = 1'b1;
                         end
+                    
+                    OP_LOAD_WGT:
+                        if(can_issue_load_wgt()) begin
+                            issue_packet.valid  = 1'b1;
+                            issue_packet.opcode = current_inst.opcode;
+                            issue_packet.src    = current_inst.src;
+                            issue_packet.dst    = current_inst.dst;
+                            issue_packet.addr   = current_inst.addr;
+                            issue_packet.length = current_inst.length;
+                            issue_valid = 1'b1;
+                            issue_index = i;
+                            already_selected = 1'b1;
+                        end
 
                     OP_MATMUL:
                         if(can_issue_matmul(current_inst.src, current_inst.dst)) begin
@@ -349,18 +354,18 @@ module control_unit #(
                             already_selected = 1'b1;
                         end
 
-                    OP_SWAP_WGT:
-                        if(can_issue_swap_wgt()) begin
-                            issue_packet.valid  = 1'b1;
-                            issue_packet.opcode = current_inst.opcode;
-                            issue_packet.src    = current_inst.src;
-                            issue_packet.dst    = current_inst.dst;
-                            issue_packet.addr   = current_inst.addr;
-                            issue_packet.length = current_inst.length;
-                            issue_valid = 1'b1;
-                            issue_index = i;
-                            already_selected = 1'b1;
-                        end
+                    // OP_SWAP_WGT:
+                    //     if(can_issue_swap_wgt()) begin
+                    //         issue_packet.valid  = 1'b1;
+                    //         issue_packet.opcode = current_inst.opcode;
+                    //         issue_packet.src    = current_inst.src;
+                    //         issue_packet.dst    = current_inst.dst;
+                    //         issue_packet.addr   = current_inst.addr;
+                    //         issue_packet.length = current_inst.length;
+                    //         issue_valid = 1'b1;
+                    //         issue_index = i;
+                    //         already_selected = 1'b1;
+                    //     end
 
                     OP_END: begin
                         issue_packet.valid  = 1'b1;
@@ -390,12 +395,12 @@ module control_unit #(
 
                 OP_LOAD_WGT: begin
                     // Kick off a DMA read burst for the weight tile. wt_wr_en/
-                    // wt_wr_row here only pulse the *first* BRAM write; actually
-                    // walking wt_wr_row across ARRAY_SIZE rows as beats arrive
+                    // wt_wr_addr here only pulse the *first* BRAM write; actually
+                    // walking wt_wr_addr across ARRAY_SIZE rows as beats arrive
                     // from master_rd_data needs a beat counter driven off
                     // master_rd_data_valid -- see TODO block below.
                     wt_wr_en  = 1'b1;
-                    wt_wr_row = issue_packet.addr[BANK_W-1:0];
+                    wt_wr_addr = issue_packet.addr[BANK_W-1:0];
 
                     dma_rd_start = 1'b1;
                     // TODO: confirm address math. Using weight_addr as base +
@@ -419,11 +424,21 @@ module control_unit #(
                     dma_rd_len   = issue_packet.length;
                 end
 
+                OP_LOAD_WGT: begin
+                    // TODO: confirm address math. and rest too
+                    wt_wr_en  = 1'b1;
+                    wt_wr_addr = issue_packet.addr[ACT_AW-1:0];
+
+                    dma_rd_start = 1'b1;
+                    dma_rd_addr  = weight_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    dma_rd_len   = issue_packet.length;
+                end
+
                 OP_MATMUL: begin
                     wt_rd_en          = 1'b1;
                     wt_rd_buf         = 1'b0;
                     act_rd_en         = 1'b1;
-                    act_rd_addr       = issue_packet.addr[BANK_W-1:0];
+                    act_rd_addr       = issue_packet.addr[ACT_AW-1:0];
                     act_rd_buf        = issue_packet.src[0];
                     array_en          = 1'b1;
                     array_clear_acc   = 1'b1;
@@ -449,9 +464,9 @@ module control_unit #(
                     dma_wr_len   = issue_packet.length;
                 end
 
-                OP_SWAP_WGT: begin
-                    array_weight_load = 1'b1;
-                end
+                // OP_SWAP_WGT: begin
+                //     array_weight_load = 1'b1;
+                // end
 
                 default: begin
                 end
@@ -496,7 +511,7 @@ module control_unit #(
 
     // TODO -- MULTI-BEAT BRAM STREAMING (hand-tune against axi4_master timing)
     // ---------------------------------------------------------------------
-    // OP_LOAD_WGT currently only pulses wt_wr_en/wt_wr_row for ONE row on the
+    // OP_LOAD_WGT currently only pulses wt_wr_en/wt_wr_addr for ONE row on the
     // cycle it's issued. A full weight tile is ARRAY_SIZE rows, arriving over
     // ARRAY_SIZE (or more, depending on DMA_WIDTH vs DATA_WIDTH*ARRAY_SIZE)
     // beats of master_rd_data_valid from axi4_master. Same issue for
@@ -512,8 +527,8 @@ module control_unit #(
     //     else if(dma_rd_state == ENG_BUSY && dma_rd_is_weight && master_rd_data_valid)
     //       wt_beat_cnt <= wt_beat_cnt + 1'b1;
     //   end
-    //   // then drive wt_wr_en/wt_wr_row off (dma_rd_is_weight && master_rd_data_valid)
-    //   // instead of only off issue_packet.valid, indexing wt_wr_row by wt_beat_cnt.
+    //   // then drive wt_wr_en/wt_wr_addr off (dma_rd_is_weight && master_rd_data_valid)
+    //   // instead of only off issue_packet.valid, indexing wt_wr_addr by wt_beat_cnt.
     //
     // This needs master_rd_data_valid piped into control_unit (new input port)
     // and an equivalent counter/mux for act_wr_addr (indexed by num_acts) and
