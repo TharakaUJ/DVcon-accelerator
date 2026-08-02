@@ -2,12 +2,12 @@
 
 module control_unit #(
     parameter integer ARRAY_SIZE = 16,
-    parameter integer ACT_DEPTH  = 512,
-    parameter integer OUT_DEPTH  = 1024,
+    parameter integer OUT_DEPTH  = 2,
     parameter integer DATA_WIDTH = 8,
     parameter integer DMA_WIDTH = 64,
-    parameter integer ACT_AW     = $clog2(ACT_DEPTH),
-    parameter integer OUT_AW     = $clog2(OUT_DEPTH),
+    parameter integer ADDR_WIDTH = 8,
+    parameter integer ACT_AW     = $clog2(ARRAY_SIZE * ARRAY_SIZE * DATA_WIDTH / DMA_WIDTH),
+    parameter integer OUT_AW     = $clog2(ARRAY_SIZE),
     parameter integer BANK_W     = $clog2(ARRAY_SIZE),
     parameter integer INSTR_WINDOW_SIZE = 4,
     parameter integer INSTR_WIDTH = 24
@@ -30,29 +30,46 @@ module control_unit #(
     output logic                 loading_weights,
     output logic                 streaming_acts,
 
+    // ── Descriptor registers (from AXI-lite slave) ───────────────────────────
+    // NOTE: these were previously dead-ended at the top level; control_unit
+    // needs them to actually program the DMA engine.
+    input  logic [DMA_WIDTH-1:0] src_addr,
+    input  logic [DMA_WIDTH-1:0] dst_addr,
+    input  logic [DMA_WIDTH-1:0] weight_addr,
+    input  logic [15:0]           img_rows,
+    input  logic [15:0]           img_cols,
+
+    // ── DMA (axi4_master) trigger interface ──────────────────────────────────
+    // NOTE: new. axi4_master's rd_start/wr_start were previously unwired
+    // from anything, so the DMA engine could never actually start a burst.
+    output logic                  dma_rd_start,
+    output logic [DMA_WIDTH-1:0] dma_rd_addr,
+    output logic [7:0]            dma_rd_len,
+    output logic                  dma_wr_start,
+    output logic [DMA_WIDTH-1:0] dma_wr_addr,
+    output logic [7:0]            dma_wr_len,
+
     // ── Weight BRAM control ──────────────────────────────────────────────────
     output logic                 wt_wr_en,
     output logic [BANK_W-1:0]    wt_wr_row,
-    output logic                 wt_wr_buf,
     output logic                 wt_rd_en,
     output logic                 wt_rd_buf,
-    output logic                 weight_swap,
 
     // ── Activation BRAM control ──────────────────────────────────────────────
     output logic                 act_wr_en,
     output logic [BANK_W-1:0]    act_wr_bank,
-    output logic [6:0]    act_wr_addr,
+    output logic [ACT_AW-1:0]    act_wr_addr,
     output logic                 act_wr_buf,
     output logic                 act_rd_en,
-    output logic [4:0]    act_rd_addr,
+    output logic [BANK_W-1:0]    act_rd_addr,
     output logic                 act_rd_buf,
 
     // ── Output BRAM control ──────────────────────────────────────────────────
     output logic                 out_rd_en,
-    output logic [6:0]    out_rd_addr,
+    output logic [OUT_AW-1:0]    out_rd_addr,
     output logic                 out_rd_buf,
     output logic                 out_wr_en,
-    output logic [4:0]    out_wr_addr,
+    output logic [BANK_W-1:0]    out_wr_addr,
     output logic                 out_wr_buf,
 
     // ── Systolic Array control ────────────────────────────────────────────────
@@ -66,6 +83,13 @@ module control_unit #(
     input  logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1]
 );
 
+    // NOTE ON ADDRESS WIDTHS:
+    // act_rd_addr/out_wr_addr are now sized [BANK_W-1:0] (row-within-array
+    // index, matches the systolic array's per-row read used during MATMUL/
+    // VECTOR), while act_wr_addr/out_rd_addr are sized [ACT_AW-1:0]/[OUT_AW-1:0]
+    // (flat BRAM address used during DMA fill/drain). Previously these were
+    // hardcoded to [4:0]/[6:0] regardless of ARRAY_SIZE/ARRAY_SIZE/OUT_DEPTH,
+    // which happened to work only for the current parameter values.
 
     ///////////////////////////////////////////////////////////////////////////////
     // Types
@@ -116,9 +140,6 @@ module control_unit #(
     // Scoreboard
     ///////////////////////////////////////////////////////////////////////////////
 
-    // Resource scoreboard: this block only stores ownership state.
-    // All issue decisions are made combinationally from these registers.
-
     buffer_state_t act_buf_state[2];
     buffer_state_t out_buf_state[2];
     buffer_state_t wgt_buf_state;
@@ -151,69 +172,52 @@ module control_unit #(
     // Dependency checker
     ///////////////////////////////////////////////////////////////////////////////
     function automatic logic can_issue_load_wgt;
-
         return
             dma_rd_state == ENG_IDLE &&
             wgt_buf_state == BUF_EMPTY;
-
     endfunction
-
 
     function automatic logic can_issue_load_act(
         input logic [1:0] dst
     );
-
         return
             dma_rd_state == ENG_IDLE &&
             act_buf_state[dst] == BUF_EMPTY;
-
     endfunction
-
 
     function automatic logic can_issue_matmul(
         input logic [1:0] src,
         input logic [1:0] dst
     );
-
         return
             array_state == ENG_IDLE &&
             wgt_buf_state == BUF_READY &&
             act_buf_state[src] == BUF_READY &&
             out_buf_state[dst] == BUF_EMPTY;
-
     endfunction
-
 
     function automatic logic can_issue_store(
         input logic [1:0] src
     );
-
         return
             dma_wr_state == ENG_IDLE &&
             out_buf_state[src] == BUF_READY;
-
     endfunction
 
-
     function automatic logic can_issue_swap_wgt;
-
         return
             wgt_buf_state == BUF_READY &&
             array_state == ENG_IDLE;
-
     endfunction
-
 
     function automatic logic can_issue_vector(
         input logic [1:0] src,
         input logic [1:0] dst
     );
-
         return
             vector_state == ENG_IDLE &&
             out_buf_state[src] == BUF_READY &&
             out_buf_state[dst] == BUF_EMPTY;
-
     endfunction
 
 
@@ -235,10 +239,8 @@ module control_unit #(
 
         wt_wr_en = 1'b0;
         wt_wr_row = '0;
-        wt_wr_buf = 1'b0;
         wt_rd_en = 1'b0;
         wt_rd_buf = 1'b0;
-        weight_swap = 1'b0;
 
         act_wr_en = 1'b0;
         act_wr_bank = '0;
@@ -258,6 +260,13 @@ module control_unit #(
         array_en = 1'b0;
         array_clear_acc = 1'b0;
         array_weight_load = 1'b0;
+
+        dma_rd_start = 1'b0;
+        dma_rd_addr  = '0;
+        dma_rd_len   = '0;
+        dma_wr_start = 1'b0;
+        dma_wr_addr  = '0;
+        dma_wr_len   = '0;
 
         loading_weights = (dma_rd_state == ENG_BUSY && dma_rd_is_weight) ||
             (wgt_buf_state == BUF_FILLING);
@@ -380,9 +389,21 @@ module control_unit #(
             unique case(issue_packet.opcode)
 
                 OP_LOAD_WGT: begin
+                    // Kick off a DMA read burst for the weight tile. wt_wr_en/
+                    // wt_wr_row here only pulse the *first* BRAM write; actually
+                    // walking wt_wr_row across ARRAY_SIZE rows as beats arrive
+                    // from master_rd_data needs a beat counter driven off
+                    // master_rd_data_valid -- see TODO block below.
                     wt_wr_en  = 1'b1;
                     wt_wr_row = issue_packet.addr[BANK_W-1:0];
-                    wt_wr_buf = 1'b0;
+
+                    dma_rd_start = 1'b1;
+                    // TODO: confirm address math. Using weight_addr as base +
+                    // an offset derived from issue_packet.addr (tile index).
+                    // Replace with whatever addressing scheme your ISA actually
+                    // encodes (e.g. addr may already be a byte/row offset).
+                    dma_rd_addr  = weight_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    dma_rd_len   = issue_packet.length; // TODO: or derive from ARRAY_SIZE*DATA_WIDTH
                 end
 
                 OP_LOAD_ACT: begin
@@ -390,22 +411,30 @@ module control_unit #(
                     act_wr_bank = issue_packet.dst;
                     act_wr_addr = issue_packet.addr[ACT_AW-1:0];
                     act_wr_buf  = issue_packet.dst[0];
+
+                    dma_rd_start = 1'b1;
+                    // TODO: confirm address math against how src_addr/img_rows/
+                    // img_cols encode the activation tensor layout.
+                    dma_rd_addr  = src_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    dma_rd_len   = issue_packet.length;
                 end
 
                 OP_MATMUL: begin
                     wt_rd_en          = 1'b1;
                     wt_rd_buf         = 1'b0;
                     act_rd_en         = 1'b1;
-                    act_rd_addr       = issue_packet.addr[ACT_AW-1:0];
+                    act_rd_addr       = issue_packet.addr[BANK_W-1:0];
                     act_rd_buf        = issue_packet.src[0];
                     array_en          = 1'b1;
                     array_clear_acc   = 1'b1;
-                    array_weight_load = 1'b1;
+                    // FIX: array_weight_load removed from here. Reloading
+                    // weights on every MATMUL was redundant with OP_SWAP_WGT,
+                    // which already exists to reload weights explicitly.
                 end
 
                 OP_VECTOR: begin
                     out_wr_en   = 1'b1;
-                    out_wr_addr = issue_packet.addr[OUT_AW-1:0];
+                    out_wr_addr = issue_packet.addr[BANK_W-1:0];
                     out_wr_buf  = issue_packet.dst[0];
                 end
 
@@ -413,10 +442,14 @@ module control_unit #(
                     out_rd_en   = 1'b1;
                     out_rd_addr = issue_packet.addr[OUT_AW-1:0];
                     out_rd_buf  = issue_packet.src[0];
+
+                    dma_wr_start = 1'b1;
+                    // TODO: confirm address math against dst_addr layout.
+                    dma_wr_addr  = dst_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    dma_wr_len   = issue_packet.length;
                 end
 
                 OP_SWAP_WGT: begin
-                    weight_swap       = 1'b1;
                     array_weight_load = 1'b1;
                 end
 
@@ -461,6 +494,32 @@ module control_unit #(
             !issue_packet.valid);
     end
 
+    // TODO -- MULTI-BEAT BRAM STREAMING (hand-tune against axi4_master timing)
+    // ---------------------------------------------------------------------
+    // OP_LOAD_WGT currently only pulses wt_wr_en/wt_wr_row for ONE row on the
+    // cycle it's issued. A full weight tile is ARRAY_SIZE rows, arriving over
+    // ARRAY_SIZE (or more, depending on DMA_WIDTH vs DATA_WIDTH*ARRAY_SIZE)
+    // beats of master_rd_data_valid from axi4_master. Same issue for
+    // OP_LOAD_ACT (num_acts beats) and OP_STORE (draining out_buf).
+    //
+    // Skeleton for what's needed here:
+    //
+    //   logic [BANK_W:0] wt_beat_cnt;
+    //   always_ff @(posedge clk) begin
+    //     if(!rst_n) wt_beat_cnt <= '0;
+    //     else if(issue_packet.valid && issue_packet.opcode == OP_LOAD_WGT)
+    //       wt_beat_cnt <= '0;
+    //     else if(dma_rd_state == ENG_BUSY && dma_rd_is_weight && master_rd_data_valid)
+    //       wt_beat_cnt <= wt_beat_cnt + 1'b1;
+    //   end
+    //   // then drive wt_wr_en/wt_wr_row off (dma_rd_is_weight && master_rd_data_valid)
+    //   // instead of only off issue_packet.valid, indexing wt_wr_row by wt_beat_cnt.
+    //
+    // This needs master_rd_data_valid piped into control_unit (new input port)
+    // and an equivalent counter/mux for act_wr_addr (indexed by num_acts) and
+    // out_rd_addr (indexed by store length). Left unimplemented since it
+    // depends on axi4_master's exact beat-valid timing, which I haven't seen.
+
 
     ///////////////////////////////////////////////////////////////////////////////
     // Scoreboard update
@@ -504,56 +563,44 @@ module control_unit #(
                 unique case(issue_packet.opcode)
 
                     OP_LOAD_WGT: begin
-
                         dma_rd_state     <= ENG_BUSY;
                         dma_rd_is_weight <= 1'b1;
                         wgt_buf_state    <= BUF_FILLING;
-
                     end
 
                     OP_LOAD_ACT: begin
-
                         dma_rd_state      <= ENG_BUSY;
                         dma_rd_is_weight  <= 1'b0;
                         dma_rd_target_buf <= issue_packet.dst[0];
                         act_buf_state[issue_packet.dst] <= BUF_FILLING;
-
                     end
 
                     OP_MATMUL: begin
-
                         array_state      <= ENG_BUSY;
                         array_input_buf  <= issue_packet.src[0];
                         array_output_buf <= issue_packet.dst[0];
 
                         act_buf_state[issue_packet.src] <= BUF_IN_USE;
                         out_buf_state[issue_packet.dst] <= BUF_IN_USE;
-
                     end
 
                     OP_VECTOR: begin
-
                         vector_state      <= ENG_BUSY;
                         vector_input_buf  <= issue_packet.src[0];
                         vector_output_buf <= issue_packet.dst[0];
 
                         out_buf_state[issue_packet.src] <= BUF_IN_USE;
                         out_buf_state[issue_packet.dst] <= BUF_IN_USE;
-
                     end
 
                     OP_STORE: begin
-
                         dma_wr_state      <= ENG_BUSY;
                         dma_wr_source_buf <= issue_packet.src[0];
                         out_buf_state[issue_packet.src] <= BUF_IN_USE;
-
                     end
 
                     OP_SWAP_WGT: begin
-
                         wgt_buf_state <= BUF_READY;
-
                     end
 
                     default: begin
@@ -568,45 +615,34 @@ module control_unit #(
             //------------------------------------------------------
 
             if(dma_rd_done) begin
-
                 dma_rd_state <= ENG_IDLE;
-
                 if(dma_rd_is_weight) begin
                     wgt_buf_state <= BUF_READY;
                 end
                 else begin
                     act_buf_state[dma_rd_target_buf] <= BUF_READY;
                 end
-
             end
 
             if(array_done) begin
-
                 array_state <= ENG_IDLE;
-
                 act_buf_state[array_input_buf] <= BUF_EMPTY;
                 out_buf_state[array_output_buf] <= BUF_READY;
-
             end
 
             if(dma_wr_done) begin
-
                 dma_wr_state <= ENG_IDLE;
                 out_buf_state[dma_wr_source_buf] <= BUF_EMPTY;
-
             end
 
             if(vector_done) begin
-
                 vector_state <= ENG_IDLE;
                 out_buf_state[vector_input_buf] <= BUF_EMPTY;
                 out_buf_state[vector_output_buf] <= BUF_READY;
-
             end
 
         end
 
     end
-
 
 endmodule

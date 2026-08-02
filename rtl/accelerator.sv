@@ -173,6 +173,10 @@ module accelerator #(
     // control unit interface
     logic loading_weights, streaming_acts, weight_swap;
 
+    // dma trigger (new)
+    logic [ADDR_WIDTH-1:0] cu_dma_rd_addr, cu_dma_wr_addr;
+    logic [7:0] cu_dma_rd_len, cu_dma_wr_len;
+
     
     axi4_master u_axi4_master (
         .clk (s_axi_aclk),
@@ -364,9 +368,8 @@ module accelerator #(
     );
 
     control_unit #(
-        .ARRAY_SIZE(32),
-        .ACT_DEPTH(1024),
-        .OUT_DEPTH(1024),
+        .ARRAY_SIZE(SYSTOLIC_ARRAY_ROWS),
+        .DMA_WIDTH(ADDR_WIDTH),                 // NEW — pass through top-level param
         .INSTR_WINDOW_SIZE(INSTR_WINDOW_SIZE)
     ) u_control_unit (
         .clk (s_axi_aclk),
@@ -378,19 +381,32 @@ module accelerator #(
         .dma_wr_done (master_wr_done),
         .array_done (array_perf_valid),
         .vector_done (vector_out_valid),
-        .num_acts (num_acts), // haven't defined
+        .num_acts (num_acts),
         .busy (busy),
         .done (done),
         .fsm_state (fsm_state),
 
-        .loading_weights (loading_weights), // haven't defined
-        .streaming_acts (streaming_acts), // haven't defined
+        // descriptor registers, previously dead-ended at the slave
+        .src_addr    (src_addr),
+        .dst_addr    (dst_addr),
+        .weight_addr (weight_addr),
+        .img_rows    (img_rows),
+        .img_cols    (img_cols),
 
+        // DMA trigger, wire straight into axi4_master's rd/wr start ports
+        .dma_rd_start (master_rd_start),
+        .dma_rd_addr  (master_rd_addr),
+        .dma_rd_len   (master_rd_len),
+        .dma_wr_start (master_wr_start),
+        .dma_wr_addr  (master_wr_addr),
+        .dma_wr_len   (master_wr_len),
+
+        .loading_weights (loading_weights),
+        .streaming_acts (streaming_acts),
 
         .wt_wr_en (wt_wr_en),
         .wt_wr_row (wt_wr_row),
         .wt_rd_en (wt_rd_en),
-        .weight_swap (weight_swap), // haven't defined
 
         .act_wr_en (act_wr_en),
         .act_wr_bank (act_wr_bank),

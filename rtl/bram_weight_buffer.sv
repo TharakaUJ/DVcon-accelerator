@@ -6,7 +6,7 @@ module bram_weight_buffer #(
     parameter integer COLS   = 16,
     parameter integer DMA_WIDTH = 64,
     parameter integer ELEMENTS_PER_DMA = DMA_WIDTH / DATA_W,
-    parameter integer WR_ADDR_W = $clog2(COLS / ELEMENTS_PER_DMA)  // chunk address within a row
+    parameter integer WR_ADDR_W = $clog2(COLS*ROWS / ELEMENTS_PER_DMA)  // chunk address within a row
 )(
     input  wire                          clk,
     input  wire                          rst_n,
