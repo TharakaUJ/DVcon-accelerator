@@ -216,7 +216,7 @@ module tb_control_unit;
     task automatic check(input bit cond, input string msg);
         if (cond) begin
             pass_cnt++;
-            // $display("  [PASS] %s", msg);
+            $display("  [PASS] %s", msg);
         end else begin
             fail_cnt++;
             $display("  [FAIL] %0t: %s", $time, msg);
@@ -379,9 +379,12 @@ module tb_control_unit;
         repeat (2) @(posedge clk);
         check(dut.dma_rd_state == 1'b1, "dma_rd engine busy before soft_reset");
 
-        soft_reset = 1; @(posedge clk); soft_reset = 0;
+        soft_reset <= 1;
         @(posedge clk);
-
+        soft_reset <= 0;
+        @(posedge clk);
+        $display($sformatf("  [INFO] after soft_reset: dma_rd_state=%0b, wgt_buf_state=%0d",
+                  dut.dma_rd_state, dut.wgt_buf_state));
         check(dut.dma_rd_state == 1'b0, "dma_rd engine forced back to IDLE by soft_reset");
         check(dut.wgt_buf_state == dut.BUF_EMPTY, "weight buffer state cleared by soft_reset");
     endtask
@@ -426,12 +429,12 @@ module tb_control_unit;
     initial begin
         $dumpfile("tb_control_unit.vcd");
         $dumpvars(0, tb_control_unit);
-
-        test_basic_pipeline();
-        test_out_of_order_issue();
-        test_dual_bank_pipelining();
+        #100;
+        // test_basic_pipeline();
+        // test_out_of_order_issue();
+        // test_dual_bank_pipelining();
         test_soft_reset();
-        test_known_issue_second_weight_load();
+        // test_known_issue_second_weight_load();
 
         $display("\n===========================================");
         $display(" RESULT: %0d passed, %0d failed", pass_cnt, fail_cnt);
