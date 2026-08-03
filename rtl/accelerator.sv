@@ -121,7 +121,6 @@ module accelerator #(
 
     // bram act buffer interface
     logic act_wr_en, act_rd_en;
-    logic [4:0] act_wr_bank;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] act_wr_addr;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] act_rd_addr;
     logic act_wr_buf, act_rd_buf;
@@ -289,7 +288,6 @@ module accelerator #(
 
         .wr_en (act_wr_en),
         .wr_buf (act_wr_buf),
-        .wr_bank (act_wr_bank),
         .wr_addr (act_wr_addr),
         .wr_data (master_rd_data),
 
@@ -407,7 +405,6 @@ module accelerator #(
         .wt_rd_en (wt_rd_en),
 
         .act_wr_en (act_wr_en),
-        .act_wr_bank (act_wr_bank),
         .act_wr_addr (act_wr_addr),
         .act_wr_buf (act_wr_buf),
         .act_rd_en (act_rd_en),

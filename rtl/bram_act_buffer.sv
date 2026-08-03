@@ -15,7 +15,6 @@ module bram_act_buffer #(
     // Write port
     input  logic                       wr_en,
     input  logic                       wr_buf,         
-    input  logic [$clog2(ACT_BANKS)-1:0] wr_bank,
     input  logic [WR_ADDR_W-1:0]       wr_addr,
     input  logic signed [DMA_WIDTH-1:0] wr_data,
 

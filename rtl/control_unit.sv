@@ -57,7 +57,6 @@ module control_unit #(
 
     // ── Activation BRAM control ──────────────────────────────────────────────
     output logic                 act_wr_en,
-    output logic [BANK_W-1:0]    act_wr_bank,
     output logic [ACT_AW-1:0]    act_wr_addr,
     output logic                 act_wr_buf,
     output logic                 act_rd_en,
@@ -235,7 +234,6 @@ module control_unit #(
         wt_rd_buf = 1'b0;
 
         act_wr_en = 1'b0;
-        act_wr_bank = '0;
         act_wr_addr = '0;
         act_wr_buf = 1'b0;
         act_rd_en = 1'b0;
@@ -414,7 +412,6 @@ module control_unit #(
 
                 OP_LOAD_ACT: begin
                     act_wr_en   = 1'b1;
-                    act_wr_bank = issue_packet.dst;
                     act_wr_addr = issue_packet.addr[ACT_AW-1:0];
                     act_wr_buf  = issue_packet.dst[0];
 
