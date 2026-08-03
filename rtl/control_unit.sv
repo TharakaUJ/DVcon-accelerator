@@ -368,17 +368,18 @@ module control_unit #(
                     //     end
 
                     OP_END: begin
-                        issue_packet.valid  = 1'b1;
-                        issue_packet.opcode = current_inst.opcode;
-                        issue_packet.src    = current_inst.src;
-                        issue_packet.dst    = current_inst.dst;
-                        issue_packet.addr   = current_inst.addr;
-                        issue_packet.length = current_inst.length;
-                        issue_valid = 1'b1;
-                        issue_index = i;
-                        already_selected = 1'b1;
+                        if (i == 0 && (dma_rd_state == ENG_IDLE) && (dma_wr_state == ENG_IDLE) && (array_state == ENG_IDLE) && (vector_state == ENG_IDLE)) begin
+                            issue_packet.valid  = 1'b1;
+                            issue_packet.opcode = current_inst.opcode;
+                            issue_packet.src    = current_inst.src;
+                            issue_packet.dst    = current_inst.dst;
+                            issue_packet.addr   = current_inst.addr;
+                            issue_packet.length = current_inst.length;
+                            issue_valid = 1'b1;
+                            issue_index = i;
+                            already_selected = 1'b1;
+                        end
                     end
-
                     default: begin
                     end
 
