@@ -10,6 +10,8 @@
 // requant_mult/shift are per-tensor here; per-channel scale is a future
 // extension (load a scale vector alongside bias).
 //==============================================================================
+`timescale 1ns/1ps
+
 module vector_unit
 #(
   parameter real SILU_SCALE = 16.0,    // SiLU LUT fixed-point scale
@@ -94,7 +96,7 @@ module vector_unit
   generate
     for (c = 0; c < OC_LANES; c++) begin : g_out
       always_comb begin
-        unique case (act_b)
+        case (act_b) // might want to use unique keyword here
           ACT_RELU: q[c] = (r_b[c] < 0) ? '0 : r_b[c];
           ACT_SILU: q[c] = silu_y[c];
           default:  q[c] = r_b[c];           // ACT_NONE
