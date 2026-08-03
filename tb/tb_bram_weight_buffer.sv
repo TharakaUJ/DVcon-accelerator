@@ -4,7 +4,8 @@
 //
 // Self-checking testbench for bram_weight_buffer.
 //   - Maintains a behavioral reference model (a simple 2-D byte array).
-//   - Drives writes (directed corner cases + randomized bursts).
+//   - Drives writes (directed corner cases + randomized bursts) using the
+//     flat wr_addr scheme (wr_addr = row*CHUNKS + chunk).
 //   - Triggers reads, waits for rd_valid, and compares every element of the
 //     flattened weight_data bus against the reference model.
 //   - Also checks rd_valid timing/latency and that rd_valid deasserts when
@@ -21,8 +22,7 @@ module tb_bram_weight_buffer;
     localparam integer DMA_WIDTH = 64;
     localparam integer EPD       = DMA_WIDTH / DATA_W;                 // elements per DMA beat
     localparam integer CHUNKS    = COLS / EPD;                        // chunks per row
-    localparam integer ROW_W     = (ROWS > 1) ? $clog2(ROWS) : 1;
-    localparam integer WR_ADDR_W = (CHUNKS > 1) ? $clog2(CHUNKS) : 1;
+    localparam integer WR_ADDR_W = $clog2(ROWS*COLS/EPD);             // flat chunk address (row*CHUNKS+chunk)
 
     localparam integer NUM_RAND_TESTS = 300;
 
@@ -33,7 +33,6 @@ module tb_bram_weight_buffer;
     reg                    rst_n;
 
     reg                    wr_en;
-    reg  [ROW_W-1:0]       wr_row;
     reg  [WR_ADDR_W-1:0]   wr_addr;
     reg  [DMA_WIDTH-1:0]   wr_data;
 
@@ -61,7 +60,6 @@ module tb_bram_weight_buffer;
         .clk         (clk),
         .rst_n       (rst_n),
         .wr_en       (wr_en),
-        .wr_row      (wr_row),
         .wr_addr     (wr_addr),
         .wr_data     (wr_data),
         .rd_en       (rd_en),
@@ -79,30 +77,30 @@ module tb_bram_weight_buffer;
     // Tasks
     // ---------------------------------------------------------------
 
-    // Drive one write beat (chunk) into row/addr with given data, and
-    // update the reference model to match.
-    task automatic do_write(input [ROW_W-1:0] row,
-                             input [WR_ADDR_W-1:0] addr,
+    // Drive one write beat (chunk) into row/chunk with given data, and
+    // update the reference model to match. Internally converts row/chunk
+    // into the DUT's flat wr_addr = row*CHUNKS + chunk.
+    task automatic do_write(input integer row,
+                             input integer chunk,
                              input [DMA_WIDTH-1:0] data);
         integer i;
         begin
             @(negedge clk);
             wr_en   = 1'b1;
-            wr_row  = row;
-            wr_addr = addr;
+            wr_addr = (row * CHUNKS + chunk);
             wr_data = data;
             @(negedge clk); // beat is captured on the intervening posedge
             wr_en   = 1'b0;
 
             for (i = 0; i < EPD; i = i + 1) begin
-                ref_mem[row][addr*EPD + i] = data[DATA_W*i +: DATA_W];
+                ref_mem[row][chunk*EPD + i] = data[DATA_W*i +: DATA_W];
             end
         end
     endtask
 
     // Pulse rd_en for one cycle, then wait for rd_valid, then compare the
     // entire flattened bus against the reference model.
-    task automatic do_read_and_check(input [ROW_W-1:0] dummy_unused);
+    task automatic do_read_and_check(input integer dummy_unused);
         integer r, c;
         reg signed [DATA_W-1:0] exp;
         reg signed [DATA_W-1:0] got;
@@ -147,19 +145,17 @@ module tb_bram_weight_buffer;
     // Stimulus
     // ---------------------------------------------------------------
     integer row_i, chunk_i, t;
+    integer rand_row, rand_chunk;
     reg [DMA_WIDTH-1:0] rand_data;
-    reg [ROW_W-1:0]     rand_row;
-    reg [WR_ADDR_W-1:0] rand_addr;
 
     initial begin
         errors = 0;
         checks = 0;
-        wr_en  = 1'b0;
-        rd_en  = 1'b0;
-        wr_row  = 0;
+        wr_en   = 1'b0;
+        rd_en   = 1'b0;
         wr_addr = 0;
         wr_data = 0;
-        rst_n  = 1'b0;
+        rst_n   = 1'b0;
 
         // init reference model to 0 (matches X-free expectation only after
         // corresponding locations are written; we only compare locations
@@ -194,7 +190,7 @@ module tb_bram_weight_buffer;
                 for (e = 0; e < EPD; e = e + 1) begin
                     beat[DATA_W*e +: DATA_W] = (row_i * 17 + chunk_i * 5 + e) & {DATA_W{1'b1}};
                 end
-                do_write(row_i[ROW_W-1:0], chunk_i[WR_ADDR_W-1:0], beat);
+                do_write(row_i, chunk_i, beat);
             end
         end
         do_read_and_check(0);
@@ -204,10 +200,10 @@ module tb_bram_weight_buffer;
         // chunk, all-zero data, all-one data, alternating pattern.
         // -----------------------------------------------------------
         $display("=== Directed test: corner cases ===");
-        do_write({ROW_W{1'b0}}, {WR_ADDR_W{1'b0}}, {DMA_WIDTH{1'b0}});
+        do_write(0, 0, {DMA_WIDTH{1'b0}});
         do_write(ROWS-1, CHUNKS-1, {DMA_WIDTH{1'b1}});
-        do_write({ROW_W{1'b0}}, CHUNKS-1, 64'hDEAD_BEEF_CAFE_F00D);
-        do_write(ROWS-1, {WR_ADDR_W{1'b0}}, 64'hA5A5_5A5A_1234_5678);
+        do_write(0, CHUNKS-1, 64'hDEAD_BEEF_CAFE_F00D);
+        do_write(ROWS-1, 0, 64'hA5A5_5A5A_1234_5678);
         do_read_and_check(0);
 
         // -----------------------------------------------------------
@@ -217,10 +213,8 @@ module tb_bram_weight_buffer;
         $display("=== Directed test: same-row multi-chunk writes ===");
         for (chunk_i = 0; chunk_i < CHUNKS; chunk_i = chunk_i + 1) begin
             reg [DMA_WIDTH-1:0] beat;
-            beat = {DMA_WIDTH{1'b0}} | (chunk_i + 1);
-            // spread a distinct byte pattern per chunk
             beat = {8{(chunk_i[7:0] ^ 8'hF0)}};
-            do_write(ROWS/2, chunk_i[WR_ADDR_W-1:0], beat);
+            do_write(ROWS/2, chunk_i, beat);
         end
         do_read_and_check(0);
 
@@ -229,10 +223,10 @@ module tb_bram_weight_buffer;
         // -----------------------------------------------------------
         $display("=== Randomized regression: %0d writes ===", NUM_RAND_TESTS);
         for (t = 0; t < NUM_RAND_TESTS; t = t + 1) begin
-            rand_row  = $urandom_range(ROWS-1, 0);
-            rand_addr = $urandom_range(CHUNKS-1, 0);
-            rand_data = {$urandom, $urandom};
-            do_write(rand_row, rand_addr, rand_data);
+            rand_row   = $urandom_range(ROWS-1, 0);
+            rand_chunk = $urandom_range(CHUNKS-1, 0);
+            rand_data  = {$urandom, $urandom};
+            do_write(rand_row, rand_chunk, rand_data);
 
             // Periodically read back and check full tile
             if (t % 25 == 24) begin

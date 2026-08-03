@@ -25,8 +25,8 @@ module bram_weight_buffer #(
     logic [$clog2(ROWS)-1:0]       wr_row;
     logic [$clog2(COLS*DATA_W/ELEMENTS_PER_DMA)-1:0]       wr_col;
 
-    assign wr_row = wr_addr / (COLS * DATA_W / ELEMENTS_PER_DMA);
-    assign wr_col = wr_addr % (COLS * DATA_W / ELEMENTS_PER_DMA);
+    assign wr_row = wr_addr / (COLS / ELEMENTS_PER_DMA);
+    assign wr_col = wr_addr % (COLS / ELEMENTS_PER_DMA);
     // Guard against a DMA_WIDTH that doesn't split evenly into DATA_W-wide elements
     initial begin
         if (DMA_WIDTH % DATA_W != 0)
