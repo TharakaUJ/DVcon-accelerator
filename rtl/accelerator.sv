@@ -53,7 +53,7 @@ module accelerator #(
     input logic s_axi_aclk,
     input logic s_axi_aresetn,
 
-    input logic s_axi_awid,
+    input logic [11:0] s_axi_awid,
     input logic [63:0] s_axi_awaddr,
     input logic [7:0] s_axi_awlen,
     input logic [2:0] s_axi_awsize,
@@ -72,11 +72,11 @@ module accelerator #(
     output logic s_axi_wready,
 
     input logic s_axi_bready,
-    output logic s_axi_bid,
+    output logic [11:0] s_axi_bid,
     output logic [1:0] s_axi_bresp,
     output logic s_axi_bvalid,
 
-    input logic s_axi_arid,
+    input logic [11:0] s_axi_arid,
     input logic [63:0] s_axi_araddr,
     input logic [7:0] s_axi_arlen,
     input logic [2:0] s_axi_arsize,
@@ -89,7 +89,7 @@ module accelerator #(
     output logic s_axi_arready,
 
     input  logic s_axi_rready,
-    output logic s_axi_rid,
+    output logic [11:0] s_axi_rid,
     output logic [63:0] s_axi_rdata,
     output logic [1:0] s_axi_rresp,
     output logic s_axi_rlast,

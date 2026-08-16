@@ -18,22 +18,22 @@ module instruction_fifo_window #(
     logic [$clog2(INSTR_DEPTH)-1:0] fetch_ptr;
 
     initial begin
-        rom[0]  = 16'h0000; 
-        rom[1]  = 16'h0001; 
-        rom[2]  = 16'h0002;
-        rom[3]  = 16'h0003;
-        rom[4]  = 16'h0004;
-        rom[5]  = 16'h0005;
-        rom[6]  = 16'h0006;
-        rom[7]  = 16'h0007;
-        rom[8]  = 16'h0008;
-        rom[9]  = 16'h0009;
-        rom[10] = 16'h000A;
-        rom[11] = 16'h000B;
-        rom[12] = 16'h000C;
-        rom[13] = 16'h000D;
-        rom[14] = 16'h000E;
-        rom[15] = 16'h000F;
+        rom[0]  = 24'h000000; 
+        rom[1]  = 24'h200020; 
+        rom[2]  = 24'h112020;
+        rom[3]  = 24'h700003;
+        rom[4]  = 24'h000004;
+        rom[5]  = 24'h000005;
+        rom[6]  = 24'h000006;
+        rom[7]  = 24'h000007;
+        rom[8]  = 24'h000000;
+        rom[9]  = 24'h000000;
+        rom[10] = 24'h000000;
+        rom[11] = 24'h000000;
+        rom[12] = 24'h000000;
+        rom[13] = 24'h000000;
+        rom[14] = 24'h000000;
+        rom[15] = 24'h000000;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

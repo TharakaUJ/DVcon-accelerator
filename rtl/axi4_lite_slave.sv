@@ -171,10 +171,10 @@ module axi4_lite_slave #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_ctrl        <= 32'h0000_0000;
-            reg_src_addr    <= 32'h8000_0000;
-            reg_dst_addr    <= 32'h8100_0000;
+            reg_src_addr    <= 32'h20040008;
+            reg_dst_addr    <= 32'h2004000c;
             reg_img_dim     <= 32'h0020_0020;
-            reg_weight_addr <= 32'h8080_0000;
+            reg_weight_addr <= 32'h20040010;
         end else begin
             // Self-clear START bit one cycle after it is latched
             if (start_pulse)
