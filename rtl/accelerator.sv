@@ -6,6 +6,13 @@ module accelerator #(
     parameter int INSTR_WINDOW_SIZE = 4,
     parameter int SYSTOLIC_ARRAY_ROWS = 32
 )(
+    // NOTE (UNKNOWN — requires clarification): bias_addr is wired below as an
+    // internal descriptor register input to control_unit, mirroring
+    // weight_addr, but axi4_lite_slave.sv was not provided so there is no
+    // confirmed AXI-lite register backing it yet. Until that register exists,
+    // it is tied to a fixed placeholder offset from weight_addr — see the
+    // note at the bias_addr assignment below.
+
     // axi master
     output logic m_axi_awvalid,
     output logic [11:0] m_axi_awid,
@@ -152,14 +159,35 @@ module accelerator #(
 
     logic [15:0] num_acts;
 
-    localparam int INSTR_WIDTH = 24;
+    localparam int INSTR_WIDTH = 32;   // was 24; widened to fit the new accum_ctrl instruction field
+
+    // bram accum buffer interface (NEW) — sits between systolic array and vector unit
+    localparam int ACC_W = 32;         // matches vector_unit's ACC_W localparam
+    logic accum_wr_en, accum_wr_init, accum_rd_en;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] accum_wr_addr, accum_rd_addr;
+    logic signed [ACC_W-1:0] accum_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    logic accum_rd_valid;
+
+    // bram bias buffer interface (NEW)
+    logic bias_wr_en, bias_rd_en;
+    logic [$clog2(SYSTOLIC_ARRAY_ROWS*ACC_W/64)-1:0] bias_wr_addr;
+    logic signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    logic bias_rd_valid;
+
+    // NOTE (UNKNOWN — requires clarification): no confirmed AXI-lite register
+    // exists for bias_addr yet (axi4_lite_slave.sv not provided). Tied to a
+    // placeholder offset from weight_addr so the datapath is complete and
+    // simulatable; replace with a real descriptor register once the slave's
+    // register map is extended.
+    logic [ADDR_WIDTH-1:0] bias_addr;
+    assign bias_addr = weight_addr + (ADDR_WIDTH'(SYSTOLIC_ARRAY_ROWS) * (DATA_WIDTH*SYSTOLIC_ARRAY_ROWS/8));
 
     // vector unit interface
-    logic vector_in_valid; // havent used yet
-    logic signed [31:0] vector_bias [0:SYSTOLIC_ARRAY_ROWS-1]; // have to wire thise. define a new memory may be
-    logic [15:0] vector_requant_mult; // have to wire this. define a new memory may be
-    logic [4:0] vector_requant_shift; // have to wire this. define a new memory may be
-    logic [1:0] vector_act_type;
+    logic vector_in_valid; // NEW — now driven by control_unit (was dangling)
+    logic signed [31:0] vector_bias [0:SYSTOLIC_ARRAY_ROWS-1]; // NEW — now driven by bias_buffer's rd_data
+    logic [15:0] vector_requant_mult; // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
+    logic [4:0] vector_requant_shift; // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
+    logic [1:0] vector_act_type;      // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
     logic vector_out_valid; // havent used yet
     logic signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
 
@@ -348,13 +376,52 @@ module accelerator #(
         .perf_valid(array_perf_valid)
     );
 
+    // NEW — accumulation buffer. Sits between the systolic array and the
+    // vector unit; array_result_out feeds its write port directly (one tile
+    // row per write, init-or-accumulate per control_unit.accum_wr_init), and
+    // its registered read port feeds vector_unit.acc.
+    bram_accum_buffer #(
+        .ACC_W(ACC_W),
+        .LANES(SYSTOLIC_ARRAY_ROWS),
+        .DEPTH(SYSTOLIC_ARRAY_ROWS)
+    ) u_bram_accum_buffer (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .wr_en   (accum_wr_en),
+        .wr_init (accum_wr_init),
+        .wr_addr (accum_wr_addr),
+        .wr_data (array_result_out),
+        .rd_en   (accum_rd_en),
+        .rd_addr (accum_rd_addr),
+        .rd_data (accum_rd_data),
+        .rd_valid(accum_rd_valid)
+    );
+
+    // NEW — bias buffer. DMA-loaded (OP_LOAD_BIAS), read on OP_VECTOR, feeds
+    // vector_unit.bias. Flat/persistent — see control_unit scoreboard notes.
+    bram_bias_buffer #(
+        .ACC_W(ACC_W),
+        .LANES(SYSTOLIC_ARRAY_ROWS)
+    ) u_bram_bias_buffer (
+        .clk (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .wr_en    (bias_wr_en),
+        .wr_addr  (bias_wr_addr),
+        .wr_data  (master_rd_data),
+        .rd_en    (bias_rd_en),
+        .bias_data(bias_rd_data),
+        .rd_valid (bias_rd_valid)
+    );
+
+    assign vector_bias = bias_rd_data;   // NEW — was a dangling/never-written register
+
     vector_unit #(
         .SILU_SCALE(16.0)
     ) u_vector_unit (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
         .in_valid (vector_in_valid),
-        .acc(array_result_out),
+        .acc(accum_rd_data),          // CHANGED — was array_result_out directly; now reads through accum_buffer
         .bias(vector_bias),
         .requant_mult(vector_requant_mult),
         .requant_shift(vector_requant_shift),
@@ -386,6 +453,7 @@ module accelerator #(
         .src_addr    (src_addr),
         .dst_addr    (dst_addr),
         .weight_addr (weight_addr),
+        .bias_addr   (bias_addr),      // NEW — see UNKNOWN note at its declaration above
         .img_rows    (img_rows),
         .img_cols    (img_cols),
 
@@ -416,6 +484,21 @@ module accelerator #(
         .out_wr_en (out_wr_en),
         .out_wr_buf(out_wr_buf),
         .out_wr_addr(out_wr_addr),
+
+        // NEW — accumulation buffer control
+        .accum_wr_en   (accum_wr_en),
+        .accum_wr_init (accum_wr_init),
+        .accum_wr_addr (accum_wr_addr),
+        .accum_rd_en   (accum_rd_en),
+        .accum_rd_addr (accum_rd_addr),
+
+        // NEW — bias buffer control
+        .bias_wr_en   (bias_wr_en),
+        .bias_wr_addr (bias_wr_addr),
+        .bias_rd_en   (bias_rd_en),
+
+        // NEW — vector unit control (previously dangling)
+        .vector_in_valid (vector_in_valid),
 
         .array_en (array_en),
         .array_clear_acc (array_clear_acc),

@@ -1,5 +1,11 @@
 `timescale 1ns/1ps
 
+// NOTE: no changes required for the accum_buffer/bias_buffer architecture
+// update. accelerator.sv's top-level port list is unchanged — the new
+// buffers, opcode, and control_unit ports are all internal to accelerator.sv
+// (bias_addr is wired internally as a placeholder; see accelerator.sv
+// comments). This smoke test only exercises the AXI-lite slave interface and
+// is unaffected. Kept as-is for reference/regression.
 module tb_accelerator;
 
     localparam integer CLK_PERIOD = 10;
