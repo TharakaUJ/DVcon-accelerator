@@ -126,6 +126,14 @@ module control_unit #(
         logic [7:0]    length;
     } issue_packet_t;
 
+    typedef enum logic [3:0] {
+        FLAG_IDLE = 4'd0,
+        FLAG_RD_WEIGHT = 4'd1,
+        FLAG_RD_DATA = 4'd2,
+        FLAG_ARRAY = 4'd4,
+        FLAG_DMA_WR = 4'd8
+    } fsm_state_t;
+
 
     ///////////////////////////////////////////////////////////////////////////////
     // Scoreboard
@@ -196,11 +204,11 @@ module control_unit #(
             out_buf_state[src] == BUF_READY;
     endfunction
 
-    // function automatic logic can_issue_swap_wgt;
-    //     return
-    //         wgt_buf_state == BUF_READY &&
-    //         array_state == ENG_IDLE;
-    // endfunction
+    function automatic logic can_issue_swap_wgt;
+        return
+            wgt_buf_state == BUF_READY &&
+            array_state == ENG_IDLE;
+    endfunction
 
     function automatic logic can_issue_vector(
         input logic [1:0] src,
@@ -353,18 +361,18 @@ module control_unit #(
                                 already_selected = 1'b1;
                             end
 
-                        // OP_SWAP_WGT:
-                        //     if(can_issue_swap_wgt()) begin
-                        //         issue_packet.valid  = 1'b1;
-                        //         issue_packet.opcode = current_inst.opcode;
-                        //         issue_packet.src    = current_inst.src;
-                        //         issue_packet.dst    = current_inst.dst;
-                        //         issue_packet.addr   = current_inst.addr;
-                        //         issue_packet.length = current_inst.length;
-                        //         issue_valid = 1'b1;
-                        //         issue_index = i;
-                        //         already_selected = 1'b1;
-                        //     end
+                        OP_SWAP_WGT:
+                            if(can_issue_swap_wgt()) begin
+                                issue_packet.valid  = 1'b1;
+                                issue_packet.opcode = current_inst.opcode;
+                                issue_packet.src    = current_inst.src;
+                                issue_packet.dst    = current_inst.dst;
+                                issue_packet.addr   = current_inst.addr;
+                                issue_packet.length = current_inst.length;
+                                issue_valid = 1'b1;
+                                issue_index = i;
+                                already_selected = 1'b1;
+                            end
 
                         OP_END: begin
                             if (i == 0 && (dma_rd_state == ENG_IDLE) && (dma_wr_state == ENG_IDLE) && (array_state == ENG_IDLE) && (vector_state == ENG_IDLE)) begin
@@ -435,9 +443,6 @@ module control_unit #(
                     act_rd_buf        = issue_packet.src[0];
                     array_en          = 1'b1;
                     array_clear_acc   = 1'b1;
-                    // FIX: array_weight_load removed from here. Reloading
-                    // weights on every MATMUL was redundant with OP_SWAP_WGT,
-                    // which already exists to reload weights explicitly.
                 end
 
                 OP_VECTOR: begin
@@ -457,9 +462,9 @@ module control_unit #(
                     dma_wr_len   = issue_packet.length;
                 end
 
-                // OP_SWAP_WGT: begin
-                //     array_weight_load = 1'b1;
-                // end
+                OP_SWAP_WGT: begin
+                    array_weight_load = 1'b1;
+                end
 
                 default: begin
                 end
@@ -467,36 +472,18 @@ module control_unit #(
             endcase
         end
 
-        // if(dma_rd_state != ENG_IDLE) begin
-        //     fsm_state = dma_rd_is_weight ? 4'd1 : 4'd2;
-        // end
-        // else if(array_state == ENG_BUSY) begin
-        //     fsm_state = 4'd3;
-        // end
-        // else if(dma_wr_state == ENG_BUSY) begin
-        //     fsm_state = 4'd4;
-        // end
-        // else if(accel_state == ENG_BUSY) begin
-        //     fsm_state = 4'd5;
-        // end
-        // else if(issue_packet.valid && issue_packet.opcode == OP_END) begin
-        //     fsm_state = 4'd7;
-        // end
-        // else begin
-        //     fsm_state = 4'd0;
-        // end
-
-        if (accel_state == ENG_BUSY) begin
-            fsm_state = 4'd4;
+        fsm_state = FLAG_IDLE;
+        if(dma_rd_state != ENG_IDLE && dma_rd_is_weight) begin
+            fsm_state = fsm_state | FLAG_RD_WEIGHT;
         end
-        else if (accel_state == ENG_IDLE) begin
-            fsm_state = 4'd1;
+        if (dma_rd_state != ENG_IDLE && !dma_rd_is_weight) begin
+            fsm_state = fsm_state | FLAG_RD_DATA;
         end
-        else if(issue_packet.valid && issue_packet.opcode == OP_END) begin
-            fsm_state = 4'd7;
+        if(array_state == ENG_BUSY) begin
+            fsm_state = fsm_state | FLAG_ARRAY;
         end
-        else begin
-            fsm_state = 4'd0;
+        if(dma_wr_state == ENG_BUSY) begin
+            fsm_state = fsm_state | FLAG_DMA_WR;
         end
 
 
