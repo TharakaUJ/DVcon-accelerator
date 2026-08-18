@@ -52,6 +52,13 @@ module control_unit #(
     output logic [DMA_WIDTH-1:0] dma_wr_addr,
     output logic [7:0]            dma_wr_len,
 
+    // NEW — per-beat handshake from axi4_master. Needed because a DMA burst
+    // is many beats; without these the control unit has no way to know
+    // *when* each beat of read data lands or each beat of write data is
+    // consumed, so it cannot step BRAM addresses across the transfer.
+    input  logic                  dma_rd_data_valid,   // pulses each accepted read-data beat
+    input  logic                  dma_wr_data_ready,   // pulses each accepted write-data beat
+
     // ── Weight BRAM control ──────────────────────────────────────────────────
     output logic                 wt_wr_en,
     output logic [ACT_AW-1:0]    wt_wr_addr,
@@ -70,6 +77,8 @@ module control_unit #(
     output logic                 out_rd_en,
     output logic [OUT_AW-1:0]    out_rd_addr,
     output logic                 out_rd_buf,
+    input  logic                 out_rd_valid,  // NEW — out_buffer's registered-read valid (was declared
+                                                  // in accelerator.sv, marked "havent used yet", never wired here)
     output logic                 out_wr_en,
     output logic [BANK_W-1:0]    out_wr_addr,
     output logic                 out_wr_buf,
@@ -82,6 +91,7 @@ module control_unit #(
     output logic [ACCUM_AW-1:0]   accum_wr_addr,
     output logic                  accum_rd_en,
     output logic [ACCUM_AW-1:0]   accum_rd_addr,
+    input  logic                  accum_rd_valid,   // NEW — accum_buffer's registered-read valid
 
     // ── Bias buffer control (NEW) ─────────────────────────────────────────────
     // Loaded via OP_LOAD_BIAS (DMA), read on OP_VECTOR. Persistent resource:
@@ -89,6 +99,7 @@ module control_unit #(
     output logic                  bias_wr_en,
     output logic [BIAS_AW-1:0]    bias_wr_addr,
     output logic                  bias_rd_en,
+    input  logic                  bias_rd_valid,    // NEW — bias_buffer's registered-read valid
 
     // ── Vector unit control (NEW — was previously undriven/dangling) ─────────
     output logic                  vector_in_valid,
@@ -216,6 +227,36 @@ module control_unit #(
     logic          array_input_buf;
     accum_ctrl_t   array_accum_ctrl;       // NEW — accum_ctrl latched at OP_MATMUL issue, used at array_done
     logic          vector_output_buf;
+
+    // NEW — multi-cycle beat bookkeeping. The engines themselves were
+    // already tracked as busy/idle correctly; what was missing was
+    // per-beat address stepping for the BRAM ports, and deferring
+    // producer-fed writes (accum/out) until the producer's data is
+    // actually valid. See the "multi-beat BRAM writes/reads" block below.
+    logic [8:0]    ld_beat_cnt;    // beats written so far for the in-flight LOAD_WGT/LOAD_ACT/LOAD_BIAS
+    logic [8:0]    ld_beat_total;  // total beats expected (= issue_packet.length+1, latched at issue — see AxLEN note below)
+    logic [7:0]    ld_base_addr;   // base BRAM row address (= issue_packet.addr, latched at issue)
+
+    logic [8:0]    st_beat_cnt;    // beats read so far for the in-flight STORE
+    logic [8:0]    st_beat_total;  // total beats expected (= issue_packet.length+1, latched at issue)
+    logic [7:0]    st_base_addr;   // base out_buf row address (= issue_packet.addr, latched at issue)
+
+    logic [ACCUM_AW-1:0] mm_accum_addr; // accum_wr_addr latched at OP_MATMUL issue, used at array_done
+    logic [BANK_W-1:0]   vec_out_addr;  // out_wr_addr latched at OP_VECTOR issue, used at vector_done
+
+    // NEW — edge-detected completion pulses. dma_rd_done/dma_wr_done are
+    // already clean 1-cycle pulses (verified from axi4_master.sv source:
+    // RD_DONE/wr_done_r are asserted for exactly one cycle), so this is a
+    // no-op for them. array_done is NOT a pulse: systolic_array.sv's perf
+    // counter FSM holds perf_valid asserted continuously from completion
+    // until the *next* clear_acc (i.e. until the next MATMUL issues) --
+    // confirmed from source. Without edge-detecting it, the completion
+    // handling below (and the pre-existing scoreboard code) would re-fire
+    // every cycle it stays high, which can race with and corrupt an
+    // OP_VECTOR issue that happens to land during that window.
+    // vector_done's provenance (vector_unit.sv) wasn't available to verify,
+    // so it's edge-detected defensively for the same class of risk.
+    logic dma_rd_done_d, dma_wr_done_d, array_done_d, vector_done_d;
 
 
     ///////////////////////////////////////////////////////////////////////////////
@@ -529,14 +570,11 @@ module control_unit #(
                 end
 
                 OP_LOAD_WGT: begin
-                    // Kick off a DMA read burst for the weight tile. wt_wr_en/
-                    // wt_wr_addr here only pulse the *first* BRAM write; actually
-                    // walking wt_wr_addr across ARRAY_SIZE rows as beats arrive
-                    // from master_rd_data needs a beat counter driven off
-                    // master_rd_data_valid -- see TODO block below.
-                    wt_wr_en  = 1'b1;
-                    wt_wr_addr = issue_packet.addr[BANK_W-1:0];
-
+                    // Kick off a DMA read burst for the weight tile. The BRAM
+                    // write itself is NOT done here (data hasn't arrived yet
+                    // on the issue cycle) -- it's driven beat-by-beat off
+                    // dma_rd_data_valid in the "multi-beat BRAM writes" block
+                    // below, using the base address/length latched at issue.
                     dma_rd_start = 1'b1;
                     // TODO: confirm address math. Using weight_addr as base +
                     // an offset derived from issue_packet.addr (tile index).
@@ -547,10 +585,7 @@ module control_unit #(
                 end
 
                 OP_LOAD_ACT: begin
-                    act_wr_en   = 1'b1;
-                    act_wr_addr = issue_packet.addr[ACT_AW-1:0];
-                    act_wr_buf  = issue_packet.dst[0];
-
+                    // BRAM write is beat-gated below (see OP_LOAD_WGT note).
                     dma_rd_start = 1'b1;
                     // TODO: confirm address math against how src_addr/img_rows/
                     // img_cols encode the activation tensor layout.
@@ -559,9 +594,7 @@ module control_unit #(
                 end
 
                 OP_LOAD_BIAS: begin   // NEW — mirrors OP_LOAD_WGT
-                    bias_wr_en   = 1'b1;
-                    bias_wr_addr = issue_packet.addr[BIAS_AW-1:0];
-
+                    // BRAM write is beat-gated below (see OP_LOAD_WGT note).
                     dma_rd_start = 1'b1;
                     // TODO: confirm address math once axi4_lite_slave.sv exposes
                     // a real bias_addr register (UNKNOWN — see summary).
@@ -579,20 +612,17 @@ module control_unit #(
                     array_clear_acc   = 1'b1;   // internal PE accumulator reset for THIS pass;
                                                  // unrelated to the external accum buffer below
 
-                    // NEW — drive the accumulation-buffer write for this tile.
-                    // wr_init overwrites the row; otherwise it's summed into the
-                    // existing partial sum (see accum_ctrl_t comment).
+                    // NOTE: the accumulation-buffer write is NOT driven here.
+                    // array_result_out only becomes valid when the array
+                    // finishes draining (array_done/array_perf_valid), which
+                    // is one or more cycles after issue. accum_wr_en/init/
+                    // addr are driven off array_done in the beat-gated block
+                    // below, using mm_accum_addr/array_accum_ctrl latched at
+                    // issue.
                     // ASSUMPTION (unverified — systolic_array.sv not provided):
                     // one MATMUL issue corresponds to one accum-buffer row, and
                     // the row index equals the same act-tile row index used for
-                    // act_rd_addr above. If the systolic array instead drains a
-                    // full tile (multiple rows) per MATMUL, accum_wr_addr will
-                    // need its own per-row beat counter — same class of TODO as
-                    // the wt/act/out multi-beat streaming note below.
-                    accum_wr_en   = 1'b1;
-                    accum_wr_init = (issue_packet.accum_ctrl == ACC_NONE) ||
-                                    (issue_packet.accum_ctrl == ACC_INIT);
-                    accum_wr_addr = issue_packet.addr[ACCUM_AW-1:0];
+                    // act_rd_addr above.
                 end
 
                 OP_VECTOR: begin
@@ -602,25 +632,19 @@ module control_unit #(
                     accum_rd_en   = 1'b1;
                     accum_rd_addr = issue_packet.addr[ACCUM_AW-1:0]; // same row-index assumption as OP_MATMUL above
                     bias_rd_en    = 1'b1;
-                    // TODO: accum_buffer/bias_buffer reads are 1-cycle
-                    // registered (see bram_accum_buffer.sv / bram_bias_buffer.sv),
-                    // so vector_in_valid firing the same cycle as accum_rd_en/
-                    // bias_rd_en is almost certainly off by one cycle relative
-                    // to when accum_rd_data/bias_data actually land. Left as a
-                    // same-cycle stub, to be pipelined correctly during the
-                    // control-unit timing/debug pass (out of scope here).
-                    vector_in_valid = 1'b1;
-
-                    out_wr_en   = 1'b1;
-                    out_wr_addr = issue_packet.addr[BANK_W-1:0];
-                    out_wr_buf  = issue_packet.dst[0];
+                    // NOTE: accum_buffer/bias_buffer reads are 1-cycle
+                    // registered, so vector_in_valid/out_wr_en are NOT driven
+                    // here. vector_in_valid fires once accum_rd_valid &&
+                    // bias_rd_valid pulse (the cycle after this rd_en pulse);
+                    // out_wr_en fires once vector_done pulses. Both are in the
+                    // beat-gated block below, using vec_out_addr and
+                    // vector_output_buf latched at issue.
                 end
 
                 OP_STORE: begin
-                    out_rd_en   = 1'b1;
-                    out_rd_addr = issue_packet.addr[OUT_AW-1:0];
-                    out_rd_buf  = issue_packet.src[0];
-
+                    // out_buf read is beat-gated below, stepped in lock-step
+                    // with dma_wr_data_ready (see OP_LOAD_WGT note for the
+                    // read-side equivalent).
                     dma_wr_start = 1'b1;
                     // TODO: confirm address math against dst_addr layout.
                     dma_wr_addr  = dst_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
@@ -635,6 +659,103 @@ module control_unit #(
                 end
 
             endcase
+        end
+
+        // ---------------------------------------------------------------
+        // NEW — multi-beat BRAM writes/reads, and producer-gated writes.
+        // ---------------------------------------------------------------
+        // The block above triggers each *engine* once at issue
+        // (dma_rd_start/dma_wr_start/array_en/accum_rd_en/bias_rd_en/etc.).
+        // That's correct and unchanged. What's below drives the BRAM
+        // *ports* on the cycle(s) their data is actually valid, which for
+        // a multi-cycle engine is one or more cycles after issue, and for
+        // a burst transfer repeats once per beat rather than once total.
+
+        // Weight / activation / bias loads: one BRAM write per accepted
+        // read-data beat, address stepping across the beats latched at
+        // issue (ld_base_addr .. ld_base_addr+ld_beat_total-1).
+        if (dma_rd_state == ENG_BUSY && dma_rd_data_valid &&
+            ld_beat_cnt < ld_beat_total) begin
+            unique case (dma_rd_target)
+                DMA_TGT_WEIGHT: begin
+                    wt_wr_en   = 1'b1;
+                    wt_wr_addr = ACT_AW'(ld_base_addr + ld_beat_cnt);
+                end
+                DMA_TGT_BIAS: begin
+                    bias_wr_en   = 1'b1;
+                    bias_wr_addr = BIAS_AW'(ld_base_addr + ld_beat_cnt);
+                end
+                DMA_TGT_ACT: begin
+                    act_wr_en   = 1'b1;
+                    act_wr_addr = ACT_AW'(ld_base_addr + ld_beat_cnt);
+                    act_wr_buf  = dma_rd_target_buf;
+                end
+                default: begin end
+            endcase
+        end
+
+        // Store: out_buf read, PREFETCHED one beat ahead of when
+        // axi4_master will actually consume it on m_axi_wdata.
+        //
+        // ASSUMPTION (bram_out_buffer.sv not provided — inferred from the
+        // established pattern of accum_buffer/bias_buffer elsewhere in
+        // this design, and from out_rd_valid already existing as a port
+        // in accelerator.sv, marked "havent used yet"): out_buffer is a
+        // registered-read BRAM, i.e. data for a given rd_addr is valid
+        // one cycle after rd_en, not the same cycle.
+        //
+        // axi4_master's write FSM has NO backpressure/wait mechanism once
+        // it enters WR_DATA (m_wvalid is asserted unconditionally as soon
+        // as the state machine gets there, and it consumes one beat per
+        // cycle m_wready is high) -- it does not wait for out_rd_valid.
+        // So the read for beat N+1 must be issued while beat N is still
+        // being consumed, not after, or wr_data will be stale/undefined
+        // for every beat past the first. If this assumption is wrong
+        // (out_buffer reads combinationally, 0-cycle latency) this
+        // prefetch is simply one beat too early and should be reverted to
+        // issuing on dma_wr_data_ready directly -- share bram_out_buffer.sv
+        // to confirm and I'll correct it.
+        if (dma_wr_start) begin
+            // Prefetch beat 0 immediately at issue -- this has at least
+            // the AW handshake's worth of cycles to land before WR_DATA
+            // begins, so it's always safe regardless of the assumption
+            // above.
+            out_rd_en   = 1'b1;
+            out_rd_addr = OUT_AW'(issue_packet.addr);
+            out_rd_buf  = issue_packet.src[0];
+        end
+        else if (dma_wr_state == ENG_BUSY && dma_wr_data_ready &&
+                 (st_beat_cnt + 9'd1) < st_beat_total) begin
+            // Beat st_beat_cnt is being consumed on wr_data THIS cycle;
+            // prefetch beat st_beat_cnt+1 now so it lands in time.
+            out_rd_en   = 1'b1;
+            out_rd_addr = OUT_AW'(st_base_addr + st_beat_cnt + 9'd1);
+            out_rd_buf  = dma_wr_source_buf;
+        end
+
+        // Matmul result -> accumulation buffer: only write once the array
+        // has actually finished draining (array_result_out is valid),
+        // using the address and init/accumulate mode latched at issue.
+        // Uses the edge-detected pulse, not the raw (level-held) array_done
+        // -- see the "edge-detected completion pulses" note above.
+        if (array_done_pulse) begin
+            accum_wr_en   = 1'b1;
+            accum_wr_addr = mm_accum_addr;
+            accum_wr_init = (array_accum_ctrl == ACC_NONE) ||
+                            (array_accum_ctrl == ACC_INIT);
+        end
+
+        // Vector unit: feed it only once BOTH the accum-buffer and
+        // bias-buffer registered reads (kicked off by accum_rd_en/
+        // bias_rd_en at OP_VECTOR issue) have actually landed. Write the
+        // result to out_buf only once the vector unit itself is done.
+        if (accum_rd_valid && bias_rd_valid) begin
+            vector_in_valid = 1'b1;
+        end
+        if (vector_done_pulse) begin
+            out_wr_en   = 1'b1;
+            out_wr_addr = vec_out_addr;
+            out_wr_buf  = vector_output_buf;
         end
 
         fsm_state = FLAG_IDLE;
@@ -664,38 +785,93 @@ module control_unit #(
         done = (issue_packet.valid && issue_packet.opcode == OP_END);
     end
 
-    // TODO -- MULTI-BEAT BRAM STREAMING (hand-tune against axi4_master timing)
-    // ---------------------------------------------------------------------
-    // OP_LOAD_WGT currently only pulses wt_wr_en/wt_wr_addr for ONE row on the
-    // cycle it's issued. A full weight tile is ARRAY_SIZE rows, arriving over
-    // ARRAY_SIZE (or more, depending on DMA_WIDTH vs DATA_WIDTH*ARRAY_SIZE)
-    // beats of master_rd_data_valid from axi4_master. Same issue for
-    // OP_LOAD_ACT (num_acts beats), OP_LOAD_BIAS (bias chunk beats), OP_STORE
-    // (draining out_buf), and — NEW — OP_MATMUL's accum_wr_addr / OP_VECTOR's
-    // accum_rd_addr, which today likewise only pulse a single row per issue
-    // (see the ASSUMPTION note on OP_MATMUL/OP_VECTOR dispatch above).
-    //
-    // Skeleton for what's needed here:
-    //
-    //   logic [BANK_W:0] wt_beat_cnt;
-    //   always_ff @(posedge clk) begin
-    //     if(!rst_n) wt_beat_cnt <= '0;
-    //     else if(issue_packet.valid && issue_packet.opcode == OP_LOAD_WGT)
-    //       wt_beat_cnt <= '0;
-    //     else if(dma_rd_state == ENG_BUSY && dma_rd_target == DMA_TGT_WEIGHT && master_rd_data_valid)
-    //       wt_beat_cnt <= wt_beat_cnt + 1'b1;
-    //   end
-    //   // then drive wt_wr_en/wt_wr_addr off (dma_rd_target==DMA_TGT_WEIGHT && master_rd_data_valid)
-    //   // instead of only off issue_packet.valid, indexing wt_wr_addr by wt_beat_cnt.
-    //
-    // This needs master_rd_data_valid piped into control_unit (new input port)
-    // and equivalent counters/muxes for act_wr_addr (indexed by num_acts),
-    // bias_wr_addr (indexed by bias chunk count), out_rd_addr (indexed by
-    // store length), and accum_wr_addr/accum_rd_addr (indexed by array drain
-    // row / vector-unit row). Left unimplemented since it depends on
-    // axi4_master's and systolic_array's exact beat-valid timing, neither of
-    // which I have full visibility into yet.
+    // RESOLVED — multi-beat BRAM streaming for weight/act/bias loads and
+    // store, and producer-gated writes for matmul/vector, are implemented
+    // in the "multi-beat BRAM writes/reads" block above (driven by the new
+    // dma_rd_data_valid/dma_wr_data_ready/accum_rd_valid/bias_rd_valid
+    // input ports) and the "Multi-cycle beat bookkeeping" always_ff below.
+    // Still UNKNOWN / unverified: whether the systolic array drains exactly
+    // one accum-buffer row per MATMUL (see ASSUMPTION note above) — could
+    // not confirm without systolic_array.sv.
 
+
+    ///////////////////////////////////////////////////////////////////////////////
+    // Multi-cycle beat bookkeeping (NEW)
+    ///////////////////////////////////////////////////////////////////////////////
+    // Latches the addressing context of a multi-beat op at issue, then steps
+    // it forward on every accepted beat (loads/stores) or captures it for
+    // use at the producer's completion event (matmul/vector). This is what
+    // the combinational "multi-beat BRAM writes/reads" block below reads.
+
+    always_ff @(posedge clk) begin
+        if (!rst_n || soft_reset) begin
+            ld_beat_cnt    <= '0;
+            ld_beat_total  <= '0;
+            ld_base_addr   <= '0;
+            st_beat_cnt    <= '0;
+            st_beat_total  <= '0;
+            st_base_addr   <= '0;
+            mm_accum_addr  <= '0;
+            vec_out_addr   <= '0;
+            dma_rd_done_d  <= 1'b0;
+            dma_wr_done_d  <= 1'b0;
+            array_done_d   <= 1'b0;
+            vector_done_d  <= 1'b0;
+        end
+        else begin
+            dma_rd_done_d <= dma_rd_done;
+            dma_wr_done_d <= dma_wr_done;
+            array_done_d  <= array_done;
+            vector_done_d <= vector_done;
+
+            // Loads (weight/activation/bias): only one can be in flight at a
+            // time (single dma_rd_state engine), so one shared counter set
+            // suffices, selected against dma_rd_target when consumed below.
+            // NOTE: dma_rd_len/dma_wr_len (driven from issue_packet.length
+            // elsewhere) are fed to axi4_master as raw AxLEN (beats-1 —
+            // confirmed from axi4_master.sv and the beat count actually
+            // observed on the bus), so the real number of local BRAM beats
+            // is length+1, not length.
+            if (issue_packet.valid &&
+                (issue_packet.opcode == OP_LOAD_WGT  ||
+                 issue_packet.opcode == OP_LOAD_ACT   ||
+                 issue_packet.opcode == OP_LOAD_BIAS)) begin
+                ld_beat_cnt   <= '0;
+                ld_beat_total <= 9'(issue_packet.length) + 9'd1;
+                ld_base_addr  <= issue_packet.addr;
+            end
+            else if (dma_rd_state == ENG_BUSY && dma_rd_data_valid &&
+                     ld_beat_cnt < ld_beat_total) begin
+                ld_beat_cnt <= ld_beat_cnt + 1'b1;
+            end
+
+            // Store: single dma_wr_state engine, one counter set.
+            if (issue_packet.valid && issue_packet.opcode == OP_STORE) begin
+                st_beat_cnt   <= '0;
+                st_beat_total <= 9'(issue_packet.length) + 9'd1;
+                st_base_addr  <= issue_packet.addr;
+            end
+            else if (dma_wr_state == ENG_BUSY && dma_wr_data_ready &&
+                     st_beat_cnt < st_beat_total) begin
+                st_beat_cnt <= st_beat_cnt + 1'b1;
+            end
+
+            // Matmul result address, needed later at array_done.
+            if (issue_packet.valid && issue_packet.opcode == OP_MATMUL) begin
+                mm_accum_addr <= issue_packet.addr[ACCUM_AW-1:0];
+            end
+
+            // Vector-unit output address, needed later at vector_done.
+            if (issue_packet.valid && issue_packet.opcode == OP_VECTOR) begin
+                vec_out_addr <= issue_packet.addr[BANK_W-1:0];
+            end
+        end
+    end
+
+    wire dma_rd_done_pulse = dma_rd_done && !dma_rd_done_d;
+    wire dma_wr_done_pulse = dma_wr_done && !dma_wr_done_d;
+    wire array_done_pulse  = array_done  && !array_done_d;
+    wire vector_done_pulse = vector_done && !vector_done_d;
 
     ///////////////////////////////////////////////////////////////////////////////
     // Scoreboard update
@@ -801,9 +977,22 @@ module control_unit #(
 
             //------------------------------------------------------
             // Completion events.
+            // NOTE: uses the edge-detected *_pulse versions, not the raw
+            // done signals. This matters most for array_done: it's a
+            // LEVEL signal (systolic_array.sv holds perf_valid asserted
+            // from completion until the next clear_acc, not just one
+            // cycle), so using it raw here would re-run this block every
+            // cycle it stays high -- including, potentially, the same
+            // cycle an OP_VECTOR issue (above) sets accum_buf_state to
+            // BUF_IN_USE, silently clobbering it back to BUF_READY since
+            // this branch runs later in program order. dma_rd_done/
+            // dma_wr_done are already clean pulses (verified from
+            // axi4_master.sv), so this is a no-op for them; vector_done is
+            // edge-detected defensively since vector_unit.sv wasn't
+            // available to verify its behavior.
             //------------------------------------------------------
 
-            if(dma_rd_done) begin
+            if(dma_rd_done_pulse) begin
                 dma_rd_state <= ENG_IDLE;
                 unique case (dma_rd_target)
                     DMA_TGT_WEIGHT: wgt_buf_state  <= BUF_READY;
@@ -812,7 +1001,7 @@ module control_unit #(
                 endcase
             end
 
-            if(array_done) begin
+            if(array_done_pulse) begin
                 array_state <= ENG_IDLE;
                 act_buf_state[array_input_buf] <= BUF_EMPTY;
 
@@ -826,12 +1015,12 @@ module control_unit #(
                 end
             end
 
-            if(dma_wr_done) begin
+            if(dma_wr_done_pulse) begin
                 dma_wr_state <= ENG_IDLE;
                 out_buf_state[dma_wr_source_buf] <= BUF_EMPTY;
             end
 
-            if(vector_done) begin
+            if(vector_done_pulse) begin
                 vector_state <= ENG_IDLE;
                 accum_buf_state <= BUF_EMPTY;    // NEW — tile consumed, ready for next reduction group
                 out_buf_state[vector_output_buf] <= BUF_READY;

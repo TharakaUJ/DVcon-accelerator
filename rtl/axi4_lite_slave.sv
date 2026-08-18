@@ -172,9 +172,9 @@ module axi4_lite_slave #(
         if (!rst_n) begin
             reg_ctrl        <= 32'h0000_0000;
             reg_src_addr    <= 32'h00020000;
-            reg_dst_addr    <= 32'h2004000c;
+            reg_dst_addr    <= 32'h00024000;
             reg_img_dim     <= 32'h0020_0020;
-            reg_weight_addr <= 32'h20040010;
+            reg_weight_addr <= 32'h00020000;
         end else begin
             // Self-clear START bit one cycle after it is latched
             if (start_pulse)
