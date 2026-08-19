@@ -6,13 +6,6 @@ module accelerator #(
     parameter int INSTR_WINDOW_SIZE = 4,
     parameter int SYSTOLIC_ARRAY_ROWS = 32
 )(
-    // NOTE (UNKNOWN — requires clarification): bias_addr is wired below as an
-    // internal descriptor register input to control_unit, mirroring
-    // weight_addr, but axi4_lite_slave.sv was not provided so there is no
-    // confirmed AXI-lite register backing it yet. Until that register exists,
-    // it is tied to a fixed placeholder offset from weight_addr — see the
-    // note at the bias_addr assignment below.
-
     // axi master
     output logic m_axi_awvalid,
     output logic [11:0] m_axi_awid,
@@ -131,14 +124,14 @@ module accelerator #(
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] act_wr_addr;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] act_rd_addr;
     logic act_wr_buf, act_rd_buf;
-    logic act_rd_valid; // havent used yet
+    logic act_rd_valid; // FIX — now consumed by control_unit to gate array_en/array_clear_acc
 
 
 
     // bram weight buffer interface
     logic wt_wr_en, wt_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS*DATA_WIDTH/ADDR_WIDTH)-1:0] wt_wr_addr;
-    logic wt_rd_valid; // havent used yet
+    logic wt_rd_valid; // FIX — now consumed by control_unit to gate wgt_buf_state/SWAP_WGT readiness
 
     // bram out buffer interface
     logic out_rd_en;
@@ -174,20 +167,18 @@ module accelerator #(
     logic signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
     logic bias_rd_valid;
 
-    // NOTE (UNKNOWN — requires clarification): no confirmed AXI-lite register
-    // exists for bias_addr yet (axi4_lite_slave.sv not provided). Tied to a
-    // placeholder offset from weight_addr so the datapath is complete and
-    // simulatable; replace with a real descriptor register once the slave's
-    // register map is extended.
+    // FIX — bias_addr is now a real, independently-settable AXI-lite
+    // register (REG_BIAS_ADDR) instead of a hardwired offset from
+    // weight_addr. Declared here as the wire coming from axi4_lite_slave;
+    // see the u_axi4_lite_slave instantiation below.
     logic [ADDR_WIDTH-1:0] bias_addr;
-    assign bias_addr = weight_addr + (ADDR_WIDTH'(SYSTOLIC_ARRAY_ROWS) * (DATA_WIDTH*SYSTOLIC_ARRAY_ROWS/8));
 
     // vector unit interface
     logic vector_in_valid; // NEW — now driven by control_unit (was dangling)
     logic signed [31:0] vector_bias [0:SYSTOLIC_ARRAY_ROWS-1]; // NEW — now driven by bias_buffer's rd_data
-    logic [15:0] vector_requant_mult; // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
-    logic [4:0] vector_requant_shift; // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
-    logic [1:0] vector_act_type;      // still unwired — no descriptor/CSR source identified (UNKNOWN, see summary)
+    logic [15:0] vector_requant_mult; // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
+    logic [4:0] vector_requant_shift; // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
+    logic [1:0] vector_act_type;      // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
     logic vector_out_valid; // havent used yet
     logic signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
 
@@ -198,6 +189,7 @@ module accelerator #(
 
     // control unit interface
     logic loading_weights, streaming_acts, weight_swap;
+    logic fifo_restart;   // NEW — see control_unit.sv "OP_END wraparound" fix
 
     // dma trigger (new)
     logic [ADDR_WIDTH-1:0] cu_dma_rd_addr, cu_dma_wr_addr;
@@ -298,6 +290,10 @@ module accelerator #(
         .img_rows (img_rows),
         .img_cols (img_cols),
         .weight_addr (weight_addr),
+        .bias_addr (bias_addr),                  // FIX — real register now, not a hardwired offset
+        .vec_requant_mult (vector_requant_mult),  // FIX — closes the dangling-CSR gap
+        .vec_requant_shift (vector_requant_shift),// FIX — closes the dangling-CSR gap
+        .vec_act_type (vector_act_type),          // FIX — closes the dangling-CSR gap
 
         .busy (busy),
         .done (done),
@@ -416,7 +412,16 @@ module accelerator #(
     assign vector_bias = bias_rd_data;   // NEW — was a dangling/never-written register
 
     vector_unit #(
-        .SILU_SCALE(16.0)
+        .SILU_SCALE(16.0),
+        .ACT_W(DATA_WIDTH),          // FIX — was hardwired to 8 inside vector_unit; now tracks the
+                                      // top-level DATA_WIDTH parameter
+        .ACC_W(ACC_W),                // FIX — was hardwired to 32; now tracks the ACC_W localparam
+                                       // already used for accum_buffer/bias_buffer above
+        .OC_LANES(SYSTOLIC_ARRAY_ROWS) // FIX — was hardwired to 32; this is the change that actually
+                                        // unblocks running the accelerator at any array size other
+                                        // than 32 (e.g. the ARRAY_SIZE=8 config used for the worked
+                                        // example) — previously this instantiation would have failed
+                                        // to elaborate at any other size.
     ) u_vector_unit (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -432,6 +437,9 @@ module accelerator #(
 
     control_unit #(
         .ARRAY_SIZE(SYSTOLIC_ARRAY_ROWS),
+        .DATA_WIDTH(DATA_WIDTH),               // FIX — was relying on both modules' independent
+                                                // defaults happening to match (8); now explicit,
+                                                // so it can't silently desync if DATA_WIDTH changes.
         .DMA_WIDTH(ADDR_WIDTH),                 // NEW — pass through top-level param
         .INSTR_WINDOW_SIZE(INSTR_WINDOW_SIZE)
     ) u_control_unit (
@@ -453,7 +461,7 @@ module accelerator #(
         .src_addr    (src_addr),
         .dst_addr    (dst_addr),
         .weight_addr (weight_addr),
-        .bias_addr   (bias_addr),      // NEW — see UNKNOWN note at its declaration above
+        .bias_addr   (bias_addr),      // FIX — now backed by a real axi4_lite_slave register
         .img_rows    (img_rows),
         .img_cols    (img_cols),
 
@@ -477,6 +485,8 @@ module accelerator #(
         .wt_wr_en (wt_wr_en),
         .wt_wr_addr (wt_wr_addr),
         .wt_rd_en (wt_rd_en),
+        .wt_rd_valid (wt_rd_valid),   // FIX — was declared "havent used yet"; now closes the
+                                       // weight-buffer-read -> array_weight_load timing gap
 
         .act_wr_en (act_wr_en),
         .act_wr_addr (act_wr_addr),
@@ -484,6 +494,8 @@ module accelerator #(
         .act_rd_en (act_rd_en),
         .act_rd_addr (act_rd_addr),
         .act_rd_buf (act_rd_buf),
+        .act_rd_valid (act_rd_valid), // FIX — was declared "havent used yet"; now closes the
+                                       // act-buffer-read -> array_en timing gap
         .out_rd_en (out_rd_en),
         .out_rd_addr (out_rd_addr),
         .out_rd_buf (out_rd_buf),
@@ -515,7 +527,8 @@ module accelerator #(
 
         .fifo_pop_en (fifo_pop_en),
         .fifo_pop_idx (fifo_pop_idx),
-        .fifo_window (fifo_window)
+        .fifo_window (fifo_window),
+        .fifo_restart (fifo_restart)   // NEW — see control_unit.sv "OP_END wraparound" fix
     );
 
     instruction_fifo_window #(
@@ -527,7 +540,8 @@ module accelerator #(
         .rst_n (s_axi_aresetn),
         .pop_en (fifo_pop_en),
         .pop_idx (fifo_pop_idx),
-        .window (fifo_window)
+        .window (fifo_window),
+        .restart (fifo_restart)        // NEW
     );
 
 endmodule

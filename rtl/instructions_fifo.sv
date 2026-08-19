@@ -10,7 +10,17 @@ module instruction_fifo_window #(
     
     input  wire                               pop_en, 
     input  wire [$clog2(WINDOW_SIZE)-1:0]     pop_idx,
-    output logic [INSTR_WIDTH-1:0]            window [0:WINDOW_SIZE-1]
+    output logic [INSTR_WIDTH-1:0]            window [0:WINDOW_SIZE-1],
+
+    // NEW — FIX for "OP_END wraparound": previously the only way to rewind
+    // fetch_ptr/window back to program address 0 was a hard rst_n. A second
+    // start_pulse after a completed run (OP_END) resumed fetching from
+    // wherever fetch_ptr had drifted to — which, since rom[] is fixed depth
+    // INSTR_DEPTH, could wrap back around into the *same* program (silently
+    // re-running it) or into stale/leftover entries past a short program's
+    // OP_END, instead of deterministically restarting at instruction 0.
+    // control_unit drives this from (start_pulse || soft_reset).
+    input  wire                               restart
 );
 
     logic [INSTR_WIDTH-1:0] rom [0:INSTR_DEPTH-1];
@@ -55,7 +65,11 @@ module instruction_fifo_window #(
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+        if (!rst_n || restart) begin
+            // FIX: restart (new) is handled identically to !rst_n — reload
+            // the window from program address 0 and reset fetch_ptr. Takes
+            // priority over pop_en so a start_pulse landing the same cycle
+            // as an in-flight pop_en can't leave a half-rewound window.
             for (int i = 0; i < WINDOW_SIZE; i++) begin
                 window[i] <= rom[i];
             end

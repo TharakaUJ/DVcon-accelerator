@@ -12,7 +12,13 @@ module control_unit #(
     parameter integer INSTR_WINDOW_SIZE = 4,
     parameter integer INSTR_WIDTH = 32,                                        // NEW — was 24; grew to fit accum_ctrl field
     parameter integer ACCUM_AW   = $clog2(ARRAY_SIZE),                          // NEW — accum buffer row address width
-    parameter integer BIAS_AW    = $clog2(ARRAY_SIZE * 32 / DMA_WIDTH)          // NEW — bias buffer chunk address width (32b elements)
+    parameter integer BIAS_AW    = $clog2(ARRAY_SIZE * 32 / DMA_WIDTH),         // NEW — bias buffer chunk address width (32b elements)
+    parameter integer ELEMENTS_PER_BEAT = DMA_WIDTH / DATA_WIDTH                // NEW — mirrors bram_act_buffer.sv's ELEMENTS_PER_DMA.
+                                                                                 // Rows delivered by a LOAD_ACT are computed as
+                                                                                 // (beats * ELEMENTS_PER_BEAT) / ARRAY_SIZE (multiply-then-divide,
+                                                                                 // so it's exact whether a row spans multiple beats — e.g. the
+                                                                                 // default ARRAY_SIZE=32 config, 4 beats/row — or multiple rows
+                                                                                 // share one beat — e.g. an ARRAY_SIZE=8 config, 1 beat/row).
 )(
     input  logic                 clk,
     input  logic                 rst_n,
@@ -38,7 +44,7 @@ module control_unit #(
     input  logic [DMA_WIDTH-1:0] src_addr,
     input  logic [DMA_WIDTH-1:0] dst_addr,
     input  logic [DMA_WIDTH-1:0] weight_addr,
-    input  logic [DMA_WIDTH-1:0] bias_addr,     // NEW — UNKNOWN: not yet backed by an axi4_lite_slave register (see summary)
+    input  logic [DMA_WIDTH-1:0] bias_addr,     // FIX — now backed by a real axi4_lite_slave register
     input  logic [15:0]           img_rows,
     input  logic [15:0]           img_cols,
 
@@ -64,6 +70,10 @@ module control_unit #(
     output logic [ACT_AW-1:0]    wt_wr_addr,
     output logic                 wt_rd_en,
     output logic                 wt_rd_buf,
+    input  logic                 wt_rd_valid,   // NEW — bram_weight_buffer's registered-read valid.
+                                                 // Needed so array_weight_load only samples weight_data
+                                                 // once it has actually been unpacked from BRAM into the
+                                                 // flat bus (1-cycle latency) — see FIX note at wgt_buf_state.
 
     // ── Activation BRAM control ──────────────────────────────────────────────
     output logic                 act_wr_en,
@@ -72,6 +82,10 @@ module control_unit #(
     output logic                 act_rd_en,
     output logic [BANK_W-1:0]    act_rd_addr,
     output logic                 act_rd_buf,
+    input  logic                 act_rd_valid,  // NEW — bram_act_buffer's registered-read valid.
+                                                 // Needed so array_en/array_clear_acc only pulse once
+                                                 // act_in is actually valid (1-cycle read latency) — see
+                                                 // FIX note at the OP_MATMUL dispatch block below.
 
     // ── Output BRAM control ──────────────────────────────────────────────────
     output logic                 out_rd_en,
@@ -112,8 +126,23 @@ module control_unit #(
     // Instruction FIFO interface
     output logic                 fifo_pop_en,
     output logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx,
-    input  logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1]
+    input  logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1],
+    output logic                 fifo_restart   // NEW — pulses on start_pulse or soft_reset so the
+                                                 // instruction_fifo_window rewinds fetch_ptr/window back
+                                                 // to program address 0. FIX for the "OP_END wraparound"
+                                                 // issue: previously the only way to rewind fetch_ptr was
+                                                 // a hard rst_n, so a second start_pulse after a completed
+                                                 // run resumed fetching from wherever the window had
+                                                 // drifted to (potentially wrapping into stale ROM
+                                                 // contents) instead of restarting the program at
+                                                 // instruction 0.
 );
+
+    initial begin
+        if ((ELEMENTS_PER_BEAT % ARRAY_SIZE != 0) && (ARRAY_SIZE % ELEMENTS_PER_BEAT != 0))
+            $error("control_unit: ELEMENTS_PER_BEAT (%0d) and ARRAY_SIZE (%0d) must divide evenly one way or the other for act-row/beat accounting to be exact",
+                   ELEMENTS_PER_BEAT, ARRAY_SIZE);
+    end
 
     ///////////////////////////////////////////////////////////////////////////////
     // Types
@@ -214,6 +243,16 @@ module control_unit #(
     buffer_state_t wgt_buf_state;
     buffer_state_t accum_buf_state;   // NEW — single-banked accumulation buffer
     buffer_state_t bias_buf_state;    // NEW — single-banked, persistent bias buffer
+
+    // FIX — architectural limit removed: previously any single MATMUL
+    // completion unconditionally forced act_buf_state[bank] back to
+    // BUF_EMPTY, even though one LOAD_ACT can deliver many rows into that
+    // bank (act_rd_addr indexes individual rows within it). That meant only
+    // ONE MATMUL could ever be issued per LOAD_ACT, forcing a full,
+    // redundant reload for every row of A. These counters track how many
+    // rows a bank still has un-consumed; the bank only goes back to
+    // BUF_EMPTY once every loaded row has actually been matmul'd.
+    logic [BANK_W:0] act_rows_remaining[2];
 
     engine_state_t dma_rd_state;
     engine_state_t dma_wr_state;
@@ -360,6 +399,7 @@ module control_unit #(
 
         fifo_pop_en  = 1'b0;
         fifo_pop_idx = '0;
+        fifo_restart = 1'b0;
 
         wt_wr_en = 1'b0;
         wt_wr_addr = '0;
@@ -559,8 +599,19 @@ module control_unit #(
             end
         end
 
-        fifo_pop_en  = issue_valid;
+        // FIX ("OP_END wraparound"): don't advance the fetch pointer past
+        // OP_END. Previously OP_END issuing still popped the window forward
+        // and fetched one more entry from the ROM at the (possibly
+        // wrapped) fetch_ptr, and — more importantly — nothing anywhere
+        // reset fetch_ptr back to program start on a subsequent run, so a
+        // second start_pulse resumed fetching from wherever the window had
+        // drifted to instead of instruction 0. This half of the fix stops
+        // the drift; fifo_restart (below) is the other half, which
+        // actually rewinds the fetch pointer on every fresh start_pulse or
+        // soft_reset.
+        fifo_pop_en  = issue_valid && (issue_packet.opcode != OP_END);
         fifo_pop_idx = issue_index;
+        fifo_restart = start_pulse || soft_reset;
 
         // Dispatch block: convert the selected issue packet into engine pulses.
         if(issue_packet.valid) begin
@@ -576,41 +627,83 @@ module control_unit #(
                     // dma_rd_data_valid in the "multi-beat BRAM writes" block
                     // below, using the base address/length latched at issue.
                     dma_rd_start = 1'b1;
-                    // TODO: confirm address math. Using weight_addr as base +
-                    // an offset derived from issue_packet.addr (tile index).
-                    // Replace with whatever addressing scheme your ISA actually
-                    // encodes (e.g. addr may already be a byte/row offset).
-                    dma_rd_addr  = weight_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
-                    dma_rd_len   = issue_packet.length; // TODO: or derive from ARRAY_SIZE*DATA_WIDTH
+                    // FIX (was TODO): issue_packet.addr is a DMA-BEAT index —
+                    // confirmed against bram_weight_buffer.sv, whose wr_addr
+                    // is explicitly a "chunk offset" that this same addr
+                    // field feeds directly (via ld_base_addr, stepped +1 per
+                    // accepted beat). The DRAM-side byte stride per unit of
+                    // addr must therefore be one beat's worth of bytes
+                    // (DMA_WIDTH/8), not one row's worth
+                    // (DATA_WIDTH*ARRAY_SIZE/8) — those only coincide when a
+                    // row happens to be exactly one beat wide. At the
+                    // default ARRAY_SIZE=32/DATA_WIDTH=8/DMA_WIDTH=64 (row=32B,
+                    // beat=8B) the old formula was a 4x addressing error.
+                    dma_rd_addr  = weight_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
+                    dma_rd_len   = issue_packet.length; // beats-1, matches axi4_master's AxLEN convention directly
                 end
 
                 OP_LOAD_ACT: begin
                     // BRAM write is beat-gated below (see OP_LOAD_WGT note).
                     dma_rd_start = 1'b1;
-                    // TODO: confirm address math against how src_addr/img_rows/
-                    // img_cols encode the activation tensor layout.
-                    dma_rd_addr  = src_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    // FIX (was TODO) — same beat-vs-row correction as
+                    // OP_LOAD_WGT above; confirmed against bram_act_buffer.sv
+                    // (this addr field feeds act_wr_addr, stepped +1/beat).
+                    dma_rd_addr  = src_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_rd_len   = issue_packet.length;
                 end
 
                 OP_LOAD_BIAS: begin   // NEW — mirrors OP_LOAD_WGT
                     // BRAM write is beat-gated below (see OP_LOAD_WGT note).
                     dma_rd_start = 1'b1;
-                    // TODO: confirm address math once axi4_lite_slave.sv exposes
-                    // a real bias_addr register (UNKNOWN — see summary).
-                    dma_rd_addr  = bias_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(32/8));
+                    // FIX (was TODO) — bias_addr is now a real register (see
+                    // axi4_lite_slave.sv). Also corrected the same beat-vs-
+                    // element bug: the old shift used one bias ELEMENT's
+                    // size (32/8=4 bytes), but this addr field feeds
+                    // bias_wr_addr, which — confirmed against
+                    // bram_bias_buffer.sv — steps by one DMA BEAT
+                    // (ELEMENTS_PER_DMA elements) per unit, not one element.
+                    dma_rd_addr  = bias_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_rd_len   = issue_packet.length;
                 end
 
                 OP_MATMUL: begin
-                    wt_rd_en          = 1'b1;
-                    wt_rd_buf         = 1'b0;
+                    // FIX: wt_rd_en removed from here. The weight tile is
+                    // already resident in bram_weight_buffer's flat output
+                    // bus by the time SWAP_WGT parks it in the array (see
+                    // the wt_rd_en drive in the producer-gated block below,
+                    // fired once right after the weight DMA completes).
+                    // Re-pulsing wt_rd_en on every MATMUL served no purpose
+                    // (nothing downstream consumed the re-read) and risked
+                    // corrupting weight_data mid-flight if a new weight load
+                    // happened to be in flight concurrently.
                     act_rd_en         = 1'b1;
-                    act_rd_addr       = issue_packet.addr[ACT_AW-1:0];
+                    act_rd_addr       = issue_packet.addr[BANK_W-1:0];   // FIX — was ACT_AW-1:0, a beat-address
+                                                                          // width, not the row-within-bank width
+                                                                          // act_rd_addr actually needs.
                     act_rd_buf        = issue_packet.src[0];
-                    array_en          = 1'b1;
-                    array_clear_acc   = 1'b1;   // internal PE accumulator reset for THIS pass;
-                                                 // unrelated to the external accum buffer below
+
+                    // FIX: array_en/array_clear_acc are NOT driven here.
+                    // bram_act_buffer.sv confirms its read is registered
+                    // (1-cycle latency, and the output *decays back to zero*
+                    // the cycle after act_rd_en de-asserts). Firing array_en
+                    // on the same cycle as act_rd_en would present the array
+                    // with stale/zero act_in on cycle T, one cycle before
+                    // the real row lands on cycle T+1.  Confirmed against
+                    // systolic_array.sv: only PE[0][0] reads act_in on the
+                    // exact cycle `en` is asserted; every other PE reads a
+                    // once-shifted-then-held copy, so as long as act_in is
+                    // correct for exactly the one cycle `en` fires, the rest
+                    // of the diagonal-skew pipeline is self-consistent
+                    // regardless of what act_in does afterward. So: gate
+                    // array_en/array_clear_acc on act_rd_valid instead (see
+                    // producer-gated block below) — this lands them on
+                    // cycle T+1, exactly when act_in is valid.
+                    //
+                    // ASSUMPTION (confirmed against systolic_array.sv): one
+                    // MATMUL issue corresponds to one accum-buffer row, and
+                    // the row index equals the same act-tile row index used
+                    // for act_rd_addr above — result_out[c] = sum_r act_in[r]*W[r][c],
+                    // i.e. exactly one output row per activation row streamed in.
 
                     // NOTE: the accumulation-buffer write is NOT driven here.
                     // array_result_out only becomes valid when the array
@@ -619,10 +712,6 @@ module control_unit #(
                     // addr are driven off array_done in the beat-gated block
                     // below, using mm_accum_addr/array_accum_ctrl latched at
                     // issue.
-                    // ASSUMPTION (unverified — systolic_array.sv not provided):
-                    // one MATMUL issue corresponds to one accum-buffer row, and
-                    // the row index equals the same act-tile row index used for
-                    // act_rd_addr above.
                 end
 
                 OP_VECTOR: begin
@@ -646,8 +735,13 @@ module control_unit #(
                     // with dma_wr_data_ready (see OP_LOAD_WGT note for the
                     // read-side equivalent).
                     dma_wr_start = 1'b1;
-                    // TODO: confirm address math against dst_addr layout.
-                    dma_wr_addr  = dst_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DATA_WIDTH*ARRAY_SIZE/8));
+                    // FIX (was TODO) — same beat-vs-row correction as
+                    // OP_LOAD_WGT/ACT/BIAS above. Confirmed against
+                    // bram_out_buffer.sv: its RD_ADDR_W is explicitly a
+                    // beat-address space (RD_RATIO = OC_LANES/ELEMENTS_PER_DMA),
+                    // and this addr field feeds out_rd_addr via
+                    // st_base_addr/st_beat_cnt, already stepped +1/beat.
+                    dma_wr_addr  = dst_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_wr_len   = issue_packet.length;
                 end
 
@@ -733,6 +827,29 @@ module control_unit #(
             out_rd_buf  = dma_wr_source_buf;
         end
 
+        // FIX — weight buffer -> systolic array weight_data bus: fire the
+        // weight buffer's own read exactly once, right when the weight DMA
+        // finishes, instead of on every MATMUL issue (which is both the
+        // wrong instruction and the wrong time — see the OP_MATMUL dispatch
+        // note above). bram_weight_buffer.sv's read has 1-cycle latency and
+        // (unlike act/out buffers) holds its value with no decay once
+        // latched, so wgt_buf_state is gated on wt_rd_valid below to ensure
+        // SWAP_WGT never parks the array before weight_data is actually
+        // valid.
+        if (dma_rd_done_pulse && dma_rd_target == DMA_TGT_WEIGHT) begin
+            wt_rd_en = 1'b1;
+        end
+
+        // FIX — activation buffer -> systolic array act_in bus: fire
+        // array_en/array_clear_acc exactly once act_rd_valid pulses (i.e.
+        // the cycle act_in actually carries the requested row), not on the
+        // same cycle act_rd_en was asserted. See the OP_MATMUL dispatch note
+        // above for why this alignment matters.
+        if (act_rd_valid) begin
+            array_en        = 1'b1;
+            array_clear_acc = 1'b1;
+        end
+
         // Matmul result -> accumulation buffer: only write once the array
         // has actually finished draining (array_result_out is valid),
         // using the address and init/accumulate mode latched at issue.
@@ -790,9 +907,9 @@ module control_unit #(
     // in the "multi-beat BRAM writes/reads" block above (driven by the new
     // dma_rd_data_valid/dma_wr_data_ready/accum_rd_valid/bias_rd_valid
     // input ports) and the "Multi-cycle beat bookkeeping" always_ff below.
-    // Still UNKNOWN / unverified: whether the systolic array drains exactly
-    // one accum-buffer row per MATMUL (see ASSUMPTION note above) — could
-    // not confirm without systolic_array.sv.
+    // CONFIRMED (was "Still UNKNOWN"): systolic_array.sv shows
+    // result_out[c] = sum_r act_in[r]*W[r][c] — exactly one output row per
+    // activation vector streamed in, i.e. one accum-buffer row per MATMUL.
 
 
     ///////////////////////////////////////////////////////////////////////////////
@@ -883,6 +1000,8 @@ module control_unit #(
 
             act_buf_state[0] <= BUF_EMPTY;
             act_buf_state[1] <= BUF_EMPTY;
+            act_rows_remaining[0] <= '0;   // NEW
+            act_rows_remaining[1] <= '0;   // NEW
 
             out_buf_state[0] <= BUF_EMPTY;
             out_buf_state[1] <= BUF_EMPTY;
@@ -930,6 +1049,12 @@ module control_unit #(
                     dma_rd_target     <= DMA_TGT_ACT;
                     dma_rd_target_buf <= issue_packet.dst[0];
                     act_buf_state[issue_packet.dst] <= BUF_FILLING;
+                    // FIX — remember how many rows this load actually delivers
+                    // (beats * ELEMENTS_PER_BEAT / ARRAY_SIZE), so completion
+                    // handling below can allow that many MATMULs before the
+                    // bank is truly empty, instead of just one.
+                    act_rows_remaining[issue_packet.dst] <=
+                        (BANK_W+1)'(((32'(issue_packet.length) + 32'd1) * ELEMENTS_PER_BEAT) / ARRAY_SIZE);
                 end
 
                 OP_LOAD_BIAS: begin   // NEW — mirrors OP_LOAD_WGT
@@ -965,7 +1090,15 @@ module control_unit #(
                 end
 
                 OP_SWAP_WGT: begin
-                    wgt_buf_state <= BUF_READY;
+                    // FIX: was `<= BUF_READY` (a no-op, since it's already
+                    // READY — that's the precondition for issuing this op),
+                    // which meant wgt_buf_state could never return to EMPTY
+                    // and a second LOAD_WGT could never be issued for the
+                    // rest of the run. Once array_weight_load fires (this
+                    // same cycle — see dispatch block), the tile is latched
+                    // into the array's own weight_reg and bram_weight_buffer
+                    // is free to be overwritten by the next tile's DMA.
+                    wgt_buf_state <= BUF_EMPTY;
                 end
 
                 default: begin
@@ -995,15 +1128,38 @@ module control_unit #(
             if(dma_rd_done_pulse) begin
                 dma_rd_state <= ENG_IDLE;
                 unique case (dma_rd_target)
-                    DMA_TGT_WEIGHT: wgt_buf_state  <= BUF_READY;
+                    // FIX: wgt_buf_state is no longer set BUF_READY here.
+                    // wt_rd_en is fired this same cycle (see producer-gated
+                    // block) to move the freshly-DMA'd tile from BRAM into
+                    // the flat weight_data bus, but that read is 1-cycle
+                    // registered — so wgt_buf_state (and therefore
+                    // can_issue_swap_wgt) must wait for wt_rd_valid, handled
+                    // in its own block below, not here.
                     DMA_TGT_BIAS:   bias_buf_state <= BUF_READY;   // NEW
                     default:        act_buf_state[dma_rd_target_buf] <= BUF_READY;
                 endcase
             end
 
+            // FIX — wgt_buf_state only becomes READY once the weight buffer's
+            // registered read has actually landed weight_data, one cycle
+            // after wt_rd_en (fired off dma_rd_done_pulse above). This is
+            // what guarantees SWAP_WGT never parks stale/undefined weights
+            // into the array.
+            if (wt_rd_valid) begin
+                wgt_buf_state <= BUF_READY;
+            end
+
             if(array_done_pulse) begin
                 array_state <= ENG_IDLE;
-                act_buf_state[array_input_buf] <= BUF_EMPTY;
+                // FIX — previously unconditional (BUF_EMPTY every time), which
+                // meant a bank could only ever serve one MATMUL no matter how
+                // many rows a LOAD_ACT had delivered into it. Now: decrement
+                // the remaining-row count for this bank, and only mark it
+                // BUF_EMPTY once that count reaches zero; otherwise leave it
+                // BUF_READY so the next row in the same load can still issue.
+                act_rows_remaining[array_input_buf] <= act_rows_remaining[array_input_buf] - 1'b1;
+                act_buf_state[array_input_buf] <=
+                    (act_rows_remaining[array_input_buf] <= 1) ? BUF_EMPTY : BUF_READY;
 
                 // NEW — accum buffer state depends on whether this MATMUL was
                 // the last tile of a reduction group (or a single-pass op).

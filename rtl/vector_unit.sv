@@ -16,12 +16,20 @@ module vector_unit
 #(
   parameter real SILU_SCALE = 16.0,    // SiLU LUT fixed-point scale
 
-  // ---- inlined from former accel_pkg (package removed) --------------------
-  localparam int ACT_W    = 8,    // INT8 activations
-  localparam int WGT_W    = 8,    // INT8 weights
-  localparam int ACC_W    = 32,   // INT32 accumulation
-  localparam int IC_LANES = 16,   // reduction lanes per cycle (input channels)
-  localparam int OC_LANES = 32,   // parallel output channels (tile width)
+  // FIX — these were `localparam` inside the parameter port list, which in
+  // SystemVerilog means fixed/non-overridable despite looking like ordinary
+  // parameters. That silently hardwired this module to OC_LANES=32 /
+  // ACT_W=8 / ACC_W=32 regardless of what accelerator.sv's SYSTOLIC_ARRAY_ROWS
+  // was set to — instantiating this accelerator at any other array size
+  // would fail to elaborate (unpacked array port-width mismatch on
+  // .acc/.bias/.q). Promoted to real `parameter`s so accelerator.sv can pass
+  // matching values through. WGT_W/IC_LANES are unused elsewhere in this
+  // module's body (kept only for documentation/future per-channel-scale use).
+  parameter int ACT_W    = 8,    // INT8 activations
+  parameter int WGT_W    = 8,    // INT8 weights
+  parameter int ACC_W    = 32,   // INT32 accumulation
+  parameter int IC_LANES = 16,   // reduction lanes per cycle (input channels)
+  parameter int OC_LANES = 32,   // parallel output channels (tile width)
 
   localparam logic [1:0] ACT_NONE = 2'd0,
   localparam logic [1:0] ACT_RELU = 2'd1,
