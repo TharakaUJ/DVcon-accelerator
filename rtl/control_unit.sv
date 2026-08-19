@@ -136,6 +136,8 @@ module control_unit #(
                                                  // drifted to (potentially wrapping into stale ROM
                                                  // contents) instead of restarting the program at
                                                  // instruction 0.
+
+    
 );
 
     initial begin
@@ -308,6 +310,12 @@ module control_unit #(
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] issue_index;
     logic          already_selected;
 
+    // NEW — tracks whether the systolic array currently holds valid, swapped-in
+    // weights, decoupled from wgt_buf_state (which only tracks the staging
+    // buffer's fill state and is intentionally cleared by SWAP_WGT to allow
+    // the next tile's LOAD_WGT to begin).
+    logic array_wgt_valid;
+
     ///////////////////////////////////////////////////////////////////////////////
     // Dependency checker
     ///////////////////////////////////////////////////////////////////////////////
@@ -351,7 +359,9 @@ module control_unit #(
                         (accum_buf_state == BUF_FILLING);
         return
             array_state == ENG_IDLE &&
-            wgt_buf_state == BUF_READY &&
+            array_wgt_valid &&              // FIX — was `== BUF_READY`, a type
+                                            // mismatch against a 1-bit logic that
+                                            // could never evaluate true
             act_buf_state[src] == BUF_READY &&
             accum_ok;
     endfunction
@@ -370,9 +380,23 @@ module control_unit #(
             array_state == ENG_IDLE;
     endfunction
 
+    function automatic logic can_issue_end;
+        return dma_rd_state == ENG_IDLE && dma_wr_state == ENG_IDLE &&
+            array_state == ENG_IDLE && vector_state == ENG_IDLE;
+    endfunction
+
     // UPDATED — OP_VECTOR now sources from accum_buffer (must be READY, i.e.
     // the reduction group's last tile has landed) and bias_buffer (must be
     // READY, i.e. loaded at least once), and still writes out_buf[dst].
+    //
+    // FIX: was `out_buf_state[dst] == BUF_EMPTY`, which — same bug class as
+    // the act-buffer scoreboard fix above — forced exactly one VECTOR write
+    // to be immediately drained by a STORE before any other row could be
+    // written into that bank, even though bram_out_buffer.sv holds many rows
+    // (OUT_DEPTH) and OP_STORE's length field exists specifically to drain
+    // several of them in one burst. Now only blocks while a STORE is
+    // actively draining the bank (BUF_IN_USE); EMPTY or READY (already has
+    // valid rows from earlier VECTOR writes) are both fine to write into.
     function automatic logic can_issue_vector(
         input logic [1:0] dst
     );
@@ -380,7 +404,7 @@ module control_unit #(
             vector_state == ENG_IDLE &&
             accum_buf_state == BUF_READY &&
             bias_buf_state == BUF_READY &&
-            out_buf_state[dst] == BUF_EMPTY;
+            out_buf_state[dst] != BUF_IN_USE;
     endfunction
 
 
@@ -577,8 +601,8 @@ module control_unit #(
                                 already_selected = 1'b1;
                             end
 
-                        OP_END: begin
-                            if (i == 0 && (dma_rd_state == ENG_IDLE) && (dma_wr_state == ENG_IDLE) && (array_state == ENG_IDLE) && (vector_state == ENG_IDLE)) begin
+                       OP_END:
+                            if (can_issue_end()) begin
                                 issue_packet.valid  = 1'b1;
                                 issue_packet.opcode = current_inst.opcode;
                                 issue_packet.src    = current_inst.src;
@@ -590,7 +614,7 @@ module control_unit #(
                                 issue_index = i;
                                 already_selected = 1'b1;
                             end
-                        end
+                            
                         default: begin
                         end
 
@@ -1080,7 +1104,15 @@ module control_unit #(
                     // bias_buf_state intentionally left untouched: bias is a
                     // persistent resource, reused across many OP_VECTOR issues
                     // until explicitly reloaded via a fresh OP_LOAD_BIAS.
-                    out_buf_state[issue_packet.dst] <= BUF_IN_USE;
+                    // FIX: out_buf_state[dst] is NOT touched here anymore.
+                    // Previously forced to BUF_IN_USE on every issue, which
+                    // (combined with the old can_issue_vector requiring
+                    // BUF_EMPTY) meant a bank could only ever receive one row
+                    // before demanding an immediate STORE. Now it's left as
+                    // whatever it already was (EMPTY on the bank's first
+                    // write, or READY if earlier VECTOR writes already
+                    // landed rows in it); vector_done_pulse below is the only
+                    // place that updates it, to BUF_READY.
                 end
 
                 OP_STORE: begin
@@ -1128,15 +1160,14 @@ module control_unit #(
             if(dma_rd_done_pulse) begin
                 dma_rd_state <= ENG_IDLE;
                 unique case (dma_rd_target)
-                    // FIX: wgt_buf_state is no longer set BUF_READY here.
-                    // wt_rd_en is fired this same cycle (see producer-gated
-                    // block) to move the freshly-DMA'd tile from BRAM into
-                    // the flat weight_data bus, but that read is 1-cycle
-                    // registered — so wgt_buf_state (and therefore
-                    // can_issue_swap_wgt) must wait for wt_rd_valid, handled
-                    // in its own block below, not here.
-                    DMA_TGT_BIAS:   bias_buf_state <= BUF_READY;   // NEW
-                    default:        act_buf_state[dma_rd_target_buf] <= BUF_READY;
+                    DMA_TGT_BIAS:   bias_buf_state <= BUF_READY;
+                    // FIX — DMA_TGT_WEIGHT must NOT fall into the act_buf_state write below.
+                    // wgt_buf_state's READY transition is handled separately, gated on
+                    // wt_rd_valid (see the block after this one) — a weight-load completion
+                    // has nothing to do with act_buf_state and must be a true no-op here.
+                    DMA_TGT_WEIGHT: ;
+                    DMA_TGT_ACT:    act_buf_state[dma_rd_target_buf] <= BUF_READY;
+                    default: ;
                 endcase
             end
 
@@ -1184,6 +1215,13 @@ module control_unit #(
 
         end
 
+    end
+
+    always_ff @(posedge clk) begin
+        if (!rst_n || soft_reset)
+            array_wgt_valid <= 1'b0;
+        else if (issue_packet.valid && issue_packet.opcode == OP_SWAP_WGT)
+            array_wgt_valid <= 1'b1;
     end
 
 endmodule
