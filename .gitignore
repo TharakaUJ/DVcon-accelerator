@@ -37,3 +37,7 @@ scripts/python/*
 
 DVCon_2026/*
 *.zip
+
+
+yoloe_compiler/examples/*
+yoloe_compiler/tests/*

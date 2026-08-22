@@ -285,25 +285,12 @@ module control_unit #(
     logic [ACCUM_AW-1:0] mm_accum_addr; // accum_wr_addr latched at OP_MATMUL issue, used at array_done
     logic [BANK_W-1:0]   vec_out_addr;  // out_wr_addr latched at OP_VECTOR issue, used at vector_done
 
-    // NEW — edge-detected completion pulses. dma_rd_done/dma_wr_done are
-    // already clean 1-cycle pulses (verified from axi4_master.sv source:
-    // RD_DONE/wr_done_r are asserted for exactly one cycle), so this is a
-    // no-op for them. array_done is NOT a pulse: systolic_array.sv's perf
-    // counter FSM holds perf_valid asserted continuously from completion
-    // until the *next* clear_acc (i.e. until the next MATMUL issues) --
-    // confirmed from source. Without edge-detecting it, the completion
-    // handling below (and the pre-existing scoreboard code) would re-fire
-    // every cycle it stays high, which can race with and corrupt an
-    // OP_VECTOR issue that happens to land during that window.
-    // vector_done's provenance (vector_unit.sv) wasn't available to verify,
-    // so it's edge-detected defensively for the same class of risk.
     logic dma_rd_done_d, dma_wr_done_d, array_done_d, vector_done_d;
 
     wire dma_rd_done_pulse = dma_rd_done && !dma_rd_done_d;
     wire dma_wr_done_pulse = dma_wr_done && !dma_wr_done_d;
     wire array_done_pulse  = array_done  && !array_done_d;
     wire vector_done_pulse = vector_done && !vector_done_d;
-
 
     ///////////////////////////////////////////////////////////////////////////////
     // Instruction window and issue packet
