@@ -1,6 +1,6 @@
 // axi4_lite_slave.sv
 // AXI4-Lite slave — configuration register file for the convolution accelerator.
-// 32-bit data bus, 64-bit address bus, 6 registers at offsets 0x00–0x14.
+// 32-bit data bus, 64-bit address bus, 8 registers at offsets 0x00–0x1C.
 // Base address (0x2000600000000000) is decoded externally; this module sees offsets only.
 
 `timescale 1ns/1ps
@@ -47,6 +47,11 @@ module axi4_lite_slave #(
     output logic [15:0]             img_rows,
     output logic [15:0]             img_cols,
     output logic [ADDR_WIDTH-1:0]   weight_addr,
+    output logic [ADDR_WIDTH-1:0]   bias_addr,       // NEW — was previously not backed by any register;
+                                                       // accelerator.sv hardwired it to weight_addr+offset.
+    output logic [15:0]             vec_requant_mult, // NEW — was dangling in accelerator.sv/vector_unit
+    output logic [4:0]              vec_requant_shift,// NEW — was dangling in accelerator.sv/vector_unit
+    output logic [1:0]              vec_act_type,     // NEW — was dangling in accelerator.sv/vector_unit
 
     // ── Accelerator status inputs ─────────────────────────────────────────────
     input  logic                    busy,
@@ -64,6 +69,8 @@ module axi4_lite_slave #(
     localparam logic [7:0] REG_DST_ADDR    = 8'h0C;
     localparam logic [7:0] REG_IMG_DIM     = 8'h10;
     localparam logic [7:0] REG_WEIGHT_ADDR = 8'h14;
+    localparam logic [7:0] REG_BIAS_ADDR   = 8'h18;   // NEW
+    localparam logic [7:0] REG_VEC_CTRL    = 8'h1C;   // NEW — [15:0]=requant_mult [20:16]=requant_shift [22:21]=act_type
 
     // =========================================================================
     // Register file
@@ -73,6 +80,8 @@ module axi4_lite_slave #(
     logic [31:0] reg_dst_addr;
     logic [31:0] reg_img_dim;
     logic [31:0] reg_weight_addr;
+    logic [31:0] reg_bias_addr;    // NEW
+    logic [31:0] reg_vec_ctrl;     // NEW
 
     // STATUS is hardware-driven; assembled combinatorially
     logic [31:0] reg_status;
@@ -171,10 +180,16 @@ module axi4_lite_slave #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_ctrl        <= 32'h0000_0000;
-            reg_src_addr    <= 32'h8000_0000;
-            reg_dst_addr    <= 32'h8100_0000;
+            reg_src_addr    <= 32'h00020000;
+            reg_dst_addr    <= 32'h00024000;
             reg_img_dim     <= 32'h0020_0020;
-            reg_weight_addr <= 32'h8080_0000;
+            reg_weight_addr <= 32'h00020000;
+            reg_bias_addr   <= 32'h00028000;  // NEW — independent default; no longer weight_addr+offset
+            // NEW — default to an identity requant (mult=1, shift=0,
+            // act_type=0/passthrough) rather than all-zero. FLAG: "0" for
+            // act_type is assumed passthrough here because vector_unit.sv
+            // was not provided — confirm this encoding once it's available.
+            reg_vec_ctrl    <= {9'd0, 2'd0, 5'd0, 16'd1};
         end else begin
             // Self-clear START bit one cycle after it is latched
             if (start_pulse)
@@ -187,6 +202,8 @@ module axi4_lite_slave #(
                     REG_DST_ADDR:    reg_dst_addr    <= apply_strobe(reg_dst_addr,    wr_data_lat, wr_strb_lat);
                     REG_IMG_DIM:     reg_img_dim     <= apply_strobe(reg_img_dim,     wr_data_lat, wr_strb_lat);
                     REG_WEIGHT_ADDR: reg_weight_addr <= apply_strobe(reg_weight_addr, wr_data_lat, wr_strb_lat);
+                    REG_BIAS_ADDR:   reg_bias_addr   <= apply_strobe(reg_bias_addr,   wr_data_lat, wr_strb_lat); // NEW
+                    REG_VEC_CTRL:    reg_vec_ctrl    <= apply_strobe(reg_vec_ctrl,    wr_data_lat, wr_strb_lat); // NEW
                     REG_STATUS:      ; // hardware-driven, writes ignored
                     default:         ; // unmapped address, ignore
                 endcase
@@ -205,6 +222,10 @@ module axi4_lite_slave #(
     assign img_rows    = reg_img_dim[31:16];
     assign img_cols    = reg_img_dim[15:0];
     assign weight_addr = reg_weight_addr;
+    assign bias_addr        = reg_bias_addr;          // NEW
+    assign vec_requant_mult  = reg_vec_ctrl[15:0];     // NEW
+    assign vec_requant_shift = reg_vec_ctrl[20:16];    // NEW
+    assign vec_act_type      = reg_vec_ctrl[22:21];    // NEW
 
     // =========================================================================
     // Read path FSM
@@ -253,6 +274,8 @@ module axi4_lite_slave #(
             REG_DST_ADDR:    s_rdata = reg_dst_addr;
             REG_IMG_DIM:     s_rdata = reg_img_dim;
             REG_WEIGHT_ADDR: s_rdata = reg_weight_addr;
+            REG_BIAS_ADDR:   s_rdata = reg_bias_addr;   // NEW
+            REG_VEC_CTRL:    s_rdata = reg_vec_ctrl;    // NEW
             default:         s_rdata = 32'hDEAD_BEEF; // unmapped — visible in waveform
         endcase
     end

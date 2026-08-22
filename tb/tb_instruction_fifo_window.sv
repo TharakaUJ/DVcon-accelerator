@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 
 module tb_instruction_fifo_window;
-    localparam integer INSTR_WIDTH = 24;
+    localparam integer INSTR_WIDTH = 32;   // was 24 — see control_unit.sv/instructions_fifo.sv (accum_ctrl field added)
     localparam integer INSTR_DEPTH  = 16;
     localparam integer WINDOW_SIZE  = 4;
     localparam integer CLK_PERIOD   = 10;
@@ -35,10 +35,10 @@ module tb_instruction_fifo_window;
         input [INSTR_WIDTH-1:0] exp;
         begin
             if (got === exp) begin
-                $display("  PASS %s got=0x%06h", tag, got);
+                $display("  PASS %s got=0x%08h", tag, got);
                 pass_cnt = pass_cnt + 1;
             end else begin
-                $display("  FAIL %s got=0x%06h exp=0x%06h", tag, got, exp);
+                $display("  FAIL %s got=0x%08h exp=0x%08h", tag, got, exp);
                 fail_cnt = fail_cnt + 1;
             end
         end
@@ -91,16 +91,30 @@ module tb_instruction_fifo_window;
         rst_n = 1'b1;
         tick;
 
-        check_window("reset window", 24'h000000, 24'h000001, 24'h000002, 24'h000003);
+        // NOTE: expected values below are derived from the ACTUAL rom[] program
+        // in instructions_fifo.sv (opcode-encoded, not sequential indices):
+        //   rom[0]=NOP            32'h00000000
+        //   rom[1]=LOAD_WGT       32'h10000400
+        //   rom[2]=LOAD_ACT       32'h20000400
+        //   rom[3]=LOAD_BIAS      32'h30000100
+        //   rom[4]=SWAP_WGT       32'h70000000
+        //   rom[5]=MATMUL         32'h40000000
+        //   rom[6..15]=0 (rom[6]=VECTOR/rom[7]=STORE/rom[8]=END unused by this
+        //   generic windowing test, since it only ever pops far enough to reach
+        //   rom[5] before wrapping into the trailing zero-filled entries).
+        check_window("reset window", 32'h00000000, 32'h10000400, 32'h20000400, 32'h30000100);
 
         pulse_pop(0);
-        check_window("pop0", 24'h000001, 24'h000002, 24'h000003, 24'h000004);
+        check_window("pop0", 32'h10000400, 32'h20000400, 32'h30000100, 32'h70000000);
 
         pulse_pop(2);
-        check_window("pop2", 24'h000001, 24'h000002, 24'h000004, 24'h000005);
+        check_window("pop2", 32'h10000400, 32'h20000400, 32'h70000000, 32'h40000000);
 
+        // 11 more full-window pops walk fetch_ptr from 6 up through 15, wrap to
+        // 0, and land on 1 — i.e. the window ends up holding rom[13..15] and
+        // rom[0], all of which are zero-valued in this program.
         repeat (11) pulse_pop(0);
-        check_window("wrap", 24'h00000D, 24'h00000E, 24'h00000F, 24'h000000);
+        check_window("wrap", 32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000);
 
         $display("\n==================================");
         $display("  INSTR FIFO TB: Passed=%0d Failed=%0d", pass_cnt, fail_cnt);
