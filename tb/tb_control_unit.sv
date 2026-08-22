@@ -114,6 +114,23 @@ module tb_control_unit;
     logic fifo_pop_en;
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx;
     logic [INSTR_WIDTH-1:0] window [0:INSTR_WINDOW_SIZE-1];
+    logic fifo_restart;   // NEW — DUT output; missing from tb broke the .* wildcard connection
+
+    // NEW — these DUT inputs were missing from the testbench entirely,
+    // which (a) makes the `.*` wildcard connection in the DUT instantiation
+    // fail to elaborate, since there's no identifier in scope for
+    // dma_rd_data_valid et al., and (b) even if connected/tied off, the DUT
+    // logic *requires* them to make forward progress: e.g. wgt_buf_state
+    // only reaches BUF_READY once wt_rd_valid pulses, and SWAP_WGT/MATMUL
+    // can never issue without that, so every test would hang until its
+    // timeout. Modeled as: dma_rd_data_valid/dma_wr_data_ready pulse every
+    // cycle their engine is busy (the DUT's beat counters are self-gating
+    // against ld_beat_total/st_beat_total, so an approximate "high while
+    // busy" pulse train is sufficient); the *_rd_valid signals are their
+    // *_rd_en counterpart delayed by one cycle, matching the RTL's own
+    // "1-cycle registered read" comments for each buffer.
+    logic dma_rd_data_valid, dma_wr_data_ready;
+    logic wt_rd_valid, act_rd_valid, out_rd_valid, accum_rd_valid, bias_rd_valid;
 
     //-----------------------------------------------------------------
     // DUT instantiation
@@ -228,12 +245,45 @@ module tb_control_unit;
         vector_done = 0;
         forever begin
             @(posedge clk);
-            if (auto_vector && out_wr_en) begin
+            // FIX — was gated on out_wr_en, but out_wr_en is only ever
+            // asserted by the DUT *after* vector_done_pulse fires (it's
+            // the write-back of the vector unit's result). Gating the
+            // responder on its own downstream effect is a deadlock: no
+            // real OP_VECTOR could ever complete. vector_in_valid is the
+            // actual issue-side handshake into the (unmodeled) vector
+            // unit, mirroring how the array auto-responder is gated on
+            // array_en rather than array's own completion side-effects.
+            if (auto_vector && vector_in_valid) begin
                 repeat (VECTOR_LATENCY) @(posedge clk);
                 vector_done <= 1; @(posedge clk); vector_done <= 0;
             end
         end
     end
+
+    //-----------------------------------------------------------------
+    // NEW — auto-responders for the registered-read valid / DMA-beat
+    // handshake ports (see declaration comment above for rationale).
+    //-----------------------------------------------------------------
+    initial dma_rd_data_valid = 0;
+    always @(posedge clk) dma_rd_data_valid <= (dut.dma_rd_state == dut.ENG_BUSY);
+
+    initial dma_wr_data_ready = 0;
+    always @(posedge clk) dma_wr_data_ready <= (dut.dma_wr_state == dut.ENG_BUSY);
+
+    initial wt_rd_valid = 0;
+    always @(posedge clk) wt_rd_valid <= wt_rd_en;
+
+    initial act_rd_valid = 0;
+    always @(posedge clk) act_rd_valid <= act_rd_en;
+
+    initial out_rd_valid = 0;
+    always @(posedge clk) out_rd_valid <= out_rd_en;
+
+    initial accum_rd_valid = 0;
+    always @(posedge clk) accum_rd_valid <= accum_rd_en;
+
+    initial bias_rd_valid = 0;
+    always @(posedge clk) bias_rd_valid <= bias_rd_en;
 
     //-----------------------------------------------------------------
     // Scoreboard/self-check bookkeeping
@@ -322,13 +372,14 @@ module tb_control_unit;
             pack_instr(OP_LOAD_WGT,  2'd0, 2'd0, 8'd0, 8'd16),
             pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16),
             pack_instr(OP_LOAD_BIAS, 2'd0, 2'd0, 8'd0, 8'd1),
+            pack_instr(OP_SWAP_WGT,  2'd0, 2'd0, 8'd0, 8'd0),  // NEW — required to set array_wgt_valid before MATMUL can issue
             pack_instr(OP_MATMUL,    2'd0, 2'd0, 8'd0, 8'd0, ACC_NONE),
             pack_instr(OP_VECTOR,    2'd0, 2'd0, 8'd0, 8'd0),
             pack_instr(OP_STORE,     2'd0, 2'd0, 8'd0, 8'd16),
             pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
         check(busy, "busy asserted after start_pulse");
 
@@ -369,11 +420,12 @@ module tb_control_unit;
         prog = '{
             pack_instr(OP_MATMUL,   2'd0, 2'd0, 8'd0, 8'd0, ACC_NONE),   // stalled: no wgt/act yet
             pack_instr(OP_LOAD_WGT, 2'd0, 2'd0, 8'd0, 8'd16),
+            pack_instr(OP_SWAP_WGT, 2'd0, 2'd0, 8'd0, 8'd0),  // NEW — required to set array_wgt_valid before MATMUL can issue
             pack_instr(OP_LOAD_ACT, 2'd0, 2'd0, 8'd0, 8'd16),
             pack_instr(OP_END,      2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
         // Right after start, MATMUL sits at window slot 0 and must NOT be
         // the one issued (its dependencies aren't ready).
@@ -415,6 +467,7 @@ module tb_control_unit;
             pack_instr(OP_LOAD_BIAS, 2'd0, 2'd0, 8'd0, 8'd1),
             pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16), // -> bank0
             pack_instr(OP_LOAD_ACT,  2'd0, 2'd1, 8'd1, 8'd16), // -> bank1, can overlap bank0's matmul/vector/store
+            pack_instr(OP_SWAP_WGT,  2'd0, 2'd0, 8'd0, 8'd0),  // NEW — required to set array_wgt_valid before MATMUL can issue
             pack_instr(OP_MATMUL,    2'd0, 2'd0, 8'd0, 8'd0, ACC_NONE),  // bank0 -> accum_buf
             pack_instr(OP_VECTOR,    2'd0, 2'd0, 8'd0, 8'd0),            // accum_buf -> out0
             pack_instr(OP_MATMUL,    2'd1, 2'd0, 8'd0, 8'd0, ACC_NONE),  // bank1 -> accum_buf (reused)
@@ -424,7 +477,7 @@ module tb_control_unit;
             pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
         wait_done(500);
         check(dut.out_buf_state[0] == dut.BUF_EMPTY && dut.out_buf_state[1] == dut.BUF_EMPTY,
               "both output banks drained after their STOREs complete");
@@ -447,7 +500,7 @@ module tb_control_unit;
             pack_instr(OP_END,      2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
         // Let the LOAD_WGT issue and get partway through its DMA latency.
         repeat (2) @(posedge clk);
@@ -484,7 +537,7 @@ module tb_control_unit;
             pack_instr(OP_END,      2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
         n = 0;
         while (!done && n < 200) begin @(posedge clk); n++; end
@@ -522,6 +575,7 @@ module tb_control_unit;
             pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16),  // -> bank0
             pack_instr(OP_LOAD_ACT,  2'd0, 2'd1, 8'd1, 8'd16),  // -> bank1
             pack_instr(OP_LOAD_BIAS, 2'd0, 2'd0, 8'd0, 8'd1),
+            pack_instr(OP_SWAP_WGT,  2'd0, 2'd0, 8'd0, 8'd0),  // NEW — required to set array_wgt_valid before MATMUL can issue
             pack_instr(OP_MATMUL,    2'd0, 2'd0, 8'd0, 8'd0, ACC_INIT),  // bank0 -> accum (overwrite, not ready)
             pack_instr(OP_MATMUL,    2'd1, 2'd0, 8'd0, 8'd0, ACC_LAST),  // bank1 -> accum (add, mark ready)
             pack_instr(OP_VECTOR,    2'd0, 2'd0, 8'd0, 8'd0),
@@ -529,7 +583,7 @@ module tb_control_unit;
             pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
-        start_pulse = 1; @(posedge clk); start_pulse = 0;
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
         wait_done(400);
 
@@ -548,12 +602,12 @@ module tb_control_unit;
         $dumpfile("tb_control_unit.vcd");
         $dumpvars(0, tb_control_unit);
         #100;
-        // test_basic_pipeline();
-        // test_out_of_order_issue();
-        // test_dual_bank_pipelining();
+        test_basic_pipeline();
+        test_out_of_order_issue();
+        test_dual_bank_pipelining();
         test_soft_reset();
-        // test_known_issue_second_weight_load();
-        // test_multi_tile_reduction();
+        test_known_issue_second_weight_load();
+        test_multi_tile_reduction();
 
         $display("\n===========================================");
         $display(" RESULT: %0d passed, %0d failed", pass_cnt, fail_cnt);
