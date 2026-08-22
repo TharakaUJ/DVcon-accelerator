@@ -7,7 +7,7 @@ module control_unit #(
     parameter integer DMA_WIDTH = 64,
     parameter integer ADDR_WIDTH = 8,
     parameter integer ACT_AW     = $clog2(ARRAY_SIZE * ARRAY_SIZE * DATA_WIDTH / DMA_WIDTH),
-    parameter integer OUT_AW     = $clog2(ARRAY_SIZE),
+    parameter integer OUT_AW     = $clog2(ARRAY_SIZE * ARRAY_SIZE * DATA_WIDTH / DMA_WIDTH),
     parameter integer BANK_W     = $clog2(ARRAY_SIZE),
     parameter integer INSTR_WINDOW_SIZE = 4,
     parameter integer INSTR_WIDTH = 32,                                        // NEW — was 24; grew to fit accum_ctrl field
@@ -298,6 +298,11 @@ module control_unit #(
     // vector_done's provenance (vector_unit.sv) wasn't available to verify,
     // so it's edge-detected defensively for the same class of risk.
     logic dma_rd_done_d, dma_wr_done_d, array_done_d, vector_done_d;
+
+    wire dma_rd_done_pulse = dma_rd_done && !dma_rd_done_d;
+    wire dma_wr_done_pulse = dma_wr_done && !dma_wr_done_d;
+    wire array_done_pulse  = array_done  && !array_done_d;
+    wire vector_done_pulse = vector_done && !vector_done_d;
 
 
     ///////////////////////////////////////////////////////////////////////////////
@@ -1009,11 +1014,6 @@ module control_unit #(
         end
     end
 
-    wire dma_rd_done_pulse = dma_rd_done && !dma_rd_done_d;
-    wire dma_wr_done_pulse = dma_wr_done && !dma_wr_done_d;
-    wire array_done_pulse  = array_done  && !array_done_d;
-    wire vector_done_pulse = vector_done && !vector_done_d;
-
     ///////////////////////////////////////////////////////////////////////////////
     // Scoreboard update
     ///////////////////////////////////////////////////////////////////////////////
@@ -1190,7 +1190,7 @@ module control_unit #(
                 // BUF_READY so the next row in the same load can still issue.
                 act_rows_remaining[array_input_buf] <= act_rows_remaining[array_input_buf] - 1'b1;
                 act_buf_state[array_input_buf] <=
-                    (act_rows_remaining[array_input_buf] <= 1) ? BUF_EMPTY : BUF_READY;
+                    buffer_state_t'((act_rows_remaining[array_input_buf] <= 1) ? BUF_EMPTY : BUF_READY);
 
                 // NEW — accum buffer state depends on whether this MATMUL was
                 // the last tile of a reduction group (or a single-pass op).
