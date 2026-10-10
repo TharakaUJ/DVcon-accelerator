@@ -419,7 +419,11 @@ module control_unit #(
     );
         return
             dma_wr_state == ENG_IDLE &&
-            out_buf_state[src] == BUF_READY;
+            out_buf_state[src] == BUF_READY &&
+            // VECTOR leaves out_buf_state alone at issue, so a bank can be
+            // READY (from an earlier row) while a VECTOR is still writing
+            // another row into it; don't start draining until that lands.
+            !(vector_state == ENG_BUSY && vector_output_buf == src[0]);
     endfunction
 
     function automatic logic can_issue_swap_wgt;
