@@ -8,7 +8,7 @@
 module axi4_lite_slave #(
     parameter int ADDR_WIDTH = 64,
     parameter int DATA_WIDTH = 64,
-    parameter int INSTR_DEPTH = 16   // NEW — must match instruction_fifo_window's INSTR_DEPTH
+    parameter int INSTR_DEPTH = 1024 // must match instruction_fifo_window's INSTR_DEPTH
 )(
     input  logic                    clk,
     input  logic                    rst_n,
@@ -66,8 +66,7 @@ module axi4_lite_slave #(
     output logic                    instr_wr_en,
     output logic [$clog2(INSTR_DEPTH)-1:0] instr_wr_addr,
     output logic [31:0]             instr_wr_data,
-    output logic [31:0]             prog_len,        // NEW — informational only; not yet consumed by
-                                                       // control_unit (see proposal doc section 3/6).
+    output logic [31:0]             prog_len,        // instruction_fifo_window returns OP_END at/after this
 
     // ── Accelerator status inputs ─────────────────────────────────────────────
     input  logic                    busy,
@@ -89,7 +88,7 @@ module axi4_lite_slave #(
     localparam logic [7:0] REG_VEC_CTRL    = 8'h1C;   // NEW — [15:0]=requant_mult [20:16]=requant_shift [22:21]=act_type
     localparam logic [7:0] REG_INSTR_ADDR  = 8'h20;   // NEW — target rom[] index for the next REG_INSTR_DATA write
     localparam logic [7:0] REG_INSTR_DATA  = 8'h24;   // NEW — write-triggers a one-cycle instr_wr_en pulse at REG_INSTR_ADDR
-    localparam logic [7:0] REG_PROG_LEN    = 8'h28;   // NEW — host-declared valid instruction count (informational)
+    localparam logic [7:0] REG_PROG_LEN    = 8'h28;   // NEW — host-declared valid instruction count; fetches at/after it read as OP_END
 
     // =========================================================================
     // Register file

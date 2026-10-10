@@ -4,7 +4,8 @@ module accelerator #(
     parameter int DATA_WIDTH = 8,
     parameter int ADDR_WIDTH = 64,
     parameter int INSTR_WINDOW_SIZE = 4,
-    parameter int SYSTOLIC_ARRAY_ROWS = 32
+    parameter int SYSTOLIC_ARRAY_ROWS = 32,
+    parameter int INSTR_DEPTH = 1024          // instruction memory entries (CPU-programmed)
 )(
     // axi master
     output logic m_axi_awvalid,
@@ -198,12 +199,11 @@ module accelerator #(
     // NEW — CPU-programmable instruction memory write port (see
     // RTL_INSTRUCTION_MEMORY_PROPOSAL.md). Sourced from axi4_lite_slave's
     // REG_INSTR_ADDR/REG_INSTR_DATA/REG_PROG_LEN registers.
-    localparam int INSTR_DEPTH = 16;
     logic                              instr_wr_en_raw;   // ungated, straight from axi4_lite_slave
     logic                              instr_wr_en;       // gated with !busy before reaching instruction_fifo_window
     logic [$clog2(INSTR_DEPTH)-1:0]    instr_wr_addr;
     logic [31:0]                       instr_wr_data;
-    logic [31:0]                       prog_len;          // informational only — not yet consumed by control_unit
+    logic [31:0]                       prog_len;          // REG_PROG_LEN: fetches at/after it read as OP_END
 
     // NEW — hazard mitigation: gate the instruction-memory write port with
     // !busy here in accelerator.sv (not inside axi4_lite_slave.sv). Rationale
@@ -284,7 +284,9 @@ module accelerator #(
 
 
 
-    axi4_lite_slave u_axi4_lite_slave (
+    axi4_lite_slave #(
+        .INSTR_DEPTH(INSTR_DEPTH)
+    ) u_axi4_lite_slave (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
 
@@ -580,7 +582,8 @@ module accelerator #(
         // NEW — CPU instruction-memory write port, gated with !busy above
         .wr_en   (instr_wr_en),
         .wr_addr (instr_wr_addr),
-        .wr_data (instr_wr_data)
+        .wr_data (instr_wr_data),
+        .prog_len (prog_len)
     );
 
 endmodule

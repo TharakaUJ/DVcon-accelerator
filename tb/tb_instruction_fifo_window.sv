@@ -17,6 +17,7 @@ module tb_instruction_fifo_window;
     reg wr_en;
     reg [$clog2(INSTR_DEPTH)-1:0] wr_addr;
     reg [INSTR_WIDTH-1:0] wr_data;
+    reg [31:0] prog_len;
 
     localparam [INSTR_WIDTH-1:0] END_WORD = 32'h8000_0000;
     // distinct, recognisable word per slot (contents are opaque to the FIFO)
@@ -37,7 +38,8 @@ module tb_instruction_fifo_window;
         .restart(restart),
         .wr_en(wr_en),
         .wr_addr(wr_addr),
-        .wr_data(wr_data)
+        .wr_data(wr_data),
+        .prog_len(prog_len)
     );
 
     integer pass_cnt = 0;
@@ -103,15 +105,20 @@ module tb_instruction_fifo_window;
         wr_en = 0;
         wr_addr = 0;
         wr_data = 0;
+        prog_len = 0;
 
         tick;
         tick;
         rst_n = 1'b1;
         tick;
 
-        // Reset: every instruction-memory slot reads as END, so a CPU that
-        // forgets to program the memory runs nothing.
+        // Reset: the window is all END, and with prog_len = 0 (nothing
+        // programmed) a restart still only fetches END.
         check_window("reset window", END_WORD, END_WORD, END_WORD, END_WORD);
+        @(negedge clk); restart = 1'b1;
+        tick;
+        @(negedge clk); restart = 1'b0;
+        check_window("restart, prog_len=0", END_WORD, END_WORD, END_WORD, END_WORD);
 
         // Program every slot through the write port, then restart (as
         // start_pulse does) to refill the window from slot 0.
@@ -122,6 +129,7 @@ module tb_instruction_fifo_window;
         @(negedge clk);
         wr_en = 1'b0;
         check_window("written, before restart", END_WORD, END_WORD, END_WORD, END_WORD);
+        prog_len = INSTR_DEPTH;
         @(negedge clk); restart = 1'b1;
         tick;
         @(negedge clk); restart = 1'b0;
@@ -133,16 +141,31 @@ module tb_instruction_fifo_window;
         pulse_pop(2);
         check_window("pop2", W(1), W(2), W(4), W(5));
 
-        // 11 more full-window pops fetch slots 6..15 and wrap to 0, so the
-        // window ends up holding slots 13, 14, 15 and 0.
+        // 11 more full-window pops fetch slots 6..15 and then run off the end
+        // of memory: no wrap-around, the window fills with END.
         repeat (11) pulse_pop(0);
-        check_window("wrap", W(13), W(14), W(15), W(0));
+        check_window("end of memory", W(13), W(14), W(15), END_WORD);
+        repeat (3) pulse_pop(0);
+        check_window("past end of memory", END_WORD, END_WORD, END_WORD, END_WORD);
 
         // restart rewinds to slot 0 again
         @(negedge clk); restart = 1'b1;
         tick;
         @(negedge clk); restart = 1'b0;
         check_window("second restart", W(0), W(1), W(2), W(3));
+
+        // A shorter program: slots at/after prog_len read as END even though
+        // they still hold words from the previous program.
+        prog_len = 6;
+        @(negedge clk); restart = 1'b1;
+        tick;
+        @(negedge clk); restart = 1'b0;
+        pulse_pop(0);
+        check_window("prog_len=6 pop", W(1), W(2), W(3), W(4));
+        pulse_pop(0);
+        check_window("prog_len=6 at limit", W(2), W(3), W(4), W(5));
+        pulse_pop(0);
+        check_window("prog_len=6 past limit", W(3), W(4), W(5), END_WORD);
 
         $display("\n==================================");
         $display("  INSTR FIFO TB: Passed=%0d Failed=%0d", pass_cnt, fail_cnt);
