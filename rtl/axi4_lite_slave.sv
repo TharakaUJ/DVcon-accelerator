@@ -1,13 +1,14 @@
 // axi4_lite_slave.sv
 // AXI4-Lite slave — configuration register file for the convolution accelerator.
-// 32-bit data bus, 64-bit address bus, 8 registers at offsets 0x00–0x1C.
+// 32-bit data bus, 64-bit address bus, registers at offsets 0x00–0x28.
 // Base address (0x2000600000000000) is decoded externally; this module sees offsets only.
 
 `timescale 1ns/1ps
 
 module axi4_lite_slave #(
     parameter int ADDR_WIDTH = 64,
-    parameter int DATA_WIDTH = 64
+    parameter int DATA_WIDTH = 64,
+    parameter int INSTR_DEPTH = 16   // NEW — must match instruction_fifo_window's INSTR_DEPTH
 )(
     input  logic                    clk,
     input  logic                    rst_n,
@@ -53,6 +54,21 @@ module axi4_lite_slave #(
     output logic [4:0]              vec_requant_shift,// NEW — was dangling in accelerator.sv/vector_unit
     output logic [1:0]              vec_act_type,     // NEW — was dangling in accelerator.sv/vector_unit
 
+    // NEW — CPU instruction-memory programming interface (see
+    // RTL_INSTRUCTION_MEMORY_PROPOSAL.md). Indirect-write-through-two-
+    // registers pattern: host writes REG_INSTR_ADDR, then writes
+    // REG_INSTR_DATA, which pulses instr_wr_en for one cycle with
+    // instr_wr_addr/instr_wr_data held from the latched registers.
+    // instr_wr_en itself is NOT gated with !busy here — that gate lives in
+    // accelerator.sv, ANDed onto this signal right before it reaches
+    // instruction_fifo_window's wr_en port. See proposal doc section 6 for
+    // why the gate is placed there instead of in this module.
+    output logic                    instr_wr_en,
+    output logic [$clog2(INSTR_DEPTH)-1:0] instr_wr_addr,
+    output logic [31:0]             instr_wr_data,
+    output logic [31:0]             prog_len,        // NEW — informational only; not yet consumed by
+                                                       // control_unit (see proposal doc section 3/6).
+
     // ── Accelerator status inputs ─────────────────────────────────────────────
     input  logic                    busy,
     input  logic                    done,
@@ -71,6 +87,9 @@ module axi4_lite_slave #(
     localparam logic [7:0] REG_WEIGHT_ADDR = 8'h14;
     localparam logic [7:0] REG_BIAS_ADDR   = 8'h18;   // NEW
     localparam logic [7:0] REG_VEC_CTRL    = 8'h1C;   // NEW — [15:0]=requant_mult [20:16]=requant_shift [22:21]=act_type
+    localparam logic [7:0] REG_INSTR_ADDR  = 8'h20;   // NEW — target rom[] index for the next REG_INSTR_DATA write
+    localparam logic [7:0] REG_INSTR_DATA  = 8'h24;   // NEW — write-triggers a one-cycle instr_wr_en pulse at REG_INSTR_ADDR
+    localparam logic [7:0] REG_PROG_LEN    = 8'h28;   // NEW — host-declared valid instruction count (informational)
 
     // =========================================================================
     // Register file
@@ -82,6 +101,9 @@ module axi4_lite_slave #(
     logic [31:0] reg_weight_addr;
     logic [31:0] reg_bias_addr;    // NEW
     logic [31:0] reg_vec_ctrl;     // NEW
+    logic [31:0] reg_instr_addr;   // NEW — latched target address for the next instruction-memory write
+    logic [31:0] reg_prog_len;     // NEW
+    logic [31:0] reg_instr_data_shadow; // NEW — shadow copy of the last REG_INSTR_DATA write, for debug readback only
 
     // STATUS is hardware-driven; assembled combinatorially
     logic [31:0] reg_status;
@@ -190,6 +212,8 @@ module axi4_lite_slave #(
             // act_type is assumed passthrough here because vector_unit.sv
             // was not provided — confirm this encoding once it's available.
             reg_vec_ctrl    <= {9'd0, 2'd0, 5'd0, 16'd1};
+            reg_instr_addr  <= 32'h0000_0000;  // NEW
+            reg_prog_len    <= 32'h0000_0000;  // NEW
         end else begin
             // Self-clear START bit one cycle after it is latched
             if (start_pulse)
@@ -204,6 +228,15 @@ module axi4_lite_slave #(
                     REG_WEIGHT_ADDR: reg_weight_addr <= apply_strobe(reg_weight_addr, wr_data_lat, wr_strb_lat);
                     REG_BIAS_ADDR:   reg_bias_addr   <= apply_strobe(reg_bias_addr,   wr_data_lat, wr_strb_lat); // NEW
                     REG_VEC_CTRL:    reg_vec_ctrl    <= apply_strobe(reg_vec_ctrl,    wr_data_lat, wr_strb_lat); // NEW
+                    REG_INSTR_ADDR:  reg_instr_addr  <= apply_strobe(reg_instr_addr,  wr_data_lat, wr_strb_lat); // NEW
+                    // NEW — REG_INSTR_DATA is write-only/pulse-only: the value written here is
+                    // never latched into a register (there's nothing to read back — see the read
+                    // mux below, which returns the last-programmed word straight out of
+                    // reg_instr_data_shadow for debug visibility only). The actual instr_wr_en
+                    // pulse is generated combinatorially below, following the same one-cycle
+                    // W_BUSY-aligned pattern used for start_pulse.
+                    REG_INSTR_DATA:  reg_instr_data_shadow <= apply_strobe(reg_instr_data_shadow, wr_data_lat, wr_strb_lat); // NEW
+                    REG_PROG_LEN:    reg_prog_len    <= apply_strobe(reg_prog_len,    wr_data_lat, wr_strb_lat); // NEW
                     REG_STATUS:      ; // hardware-driven, writes ignored
                     default:         ; // unmapped address, ignore
                 endcase
@@ -215,6 +248,17 @@ module axi4_lite_slave #(
     // The self-clear above drops it next cycle
     assign start_pulse  = reg_ctrl[0];
     assign soft_reset   = reg_ctrl[1];
+
+    // NEW — instr_wr_en: one-cycle pulse in W_BUSY when the write landing this
+    // cycle targets REG_INSTR_DATA, exactly mirroring how start_pulse is a
+    // combinational decode of reg_ctrl[0] that is live for exactly one cycle
+    // (W_BUSY is itself already a single-cycle state — see the write-path FSM
+    // above — so gating on wstate==W_BUSY && address-match is sufficient to
+    // get a clean one-cycle pulse without any extra self-clear logic).
+    assign instr_wr_en   = (wstate == W_BUSY) && (wr_addr_lat[7:0] == REG_INSTR_DATA);
+    assign instr_wr_addr = reg_instr_addr[$clog2(INSTR_DEPTH)-1:0];
+    assign instr_wr_data = apply_strobe(32'h0000_0000, wr_data_lat, wr_strb_lat); // NEW — full word, no byte-merge needed (fresh instruction word each time)
+    assign prog_len      = reg_prog_len;   // NEW
 
     // Output register values to accelerator datapath
     assign src_addr    = reg_src_addr;
@@ -276,6 +320,9 @@ module axi4_lite_slave #(
             REG_WEIGHT_ADDR: s_rdata = reg_weight_addr;
             REG_BIAS_ADDR:   s_rdata = reg_bias_addr;   // NEW
             REG_VEC_CTRL:    s_rdata = reg_vec_ctrl;    // NEW
+            REG_INSTR_ADDR:  s_rdata = reg_instr_addr;  // NEW
+            REG_INSTR_DATA:  s_rdata = reg_instr_data_shadow; // NEW — debug readback only
+            REG_PROG_LEN:    s_rdata = reg_prog_len;    // NEW
             default:         s_rdata = 32'hDEAD_BEEF; // unmapped — visible in waveform
         endcase
     end

@@ -14,7 +14,16 @@ module instruction_fifo_window #(
 
     // NEW — FIX for "OP_END wraparound" (see control_unit.sv comment). Pulses
     // on start_pulse || soft_reset; rewinds fetch_ptr/window to instruction 0.
-    input  wire                               restart
+    input  wire                               restart,
+
+    // NEW — CPU write port (see RTL_INSTRUCTION_MEMORY_PROPOSAL.md). Driven by
+    // axi4_lite_slave's REG_INSTR_ADDR/REG_INSTR_DATA registers, already
+    // gated with !busy upstream (accelerator.sv) so this port never toggles
+    // while accel_state == ENG_BUSY. One write per pulse, one cycle, no
+    // read-modify-write — plain single-port BRAM-style write.
+    input  wire                               wr_en,
+    input  wire [$clog2(INSTR_DEPTH)-1:0]     wr_addr,
+    input  wire [INSTR_WIDTH-1:0]             wr_data
 );
 
     logic [INSTR_WIDTH-1:0] rom [0:INSTR_DEPTH-1];
@@ -22,64 +31,58 @@ module instruction_fifo_window #(
     logic [$clog2(INSTR_DEPTH)-1:0] fetch_ptr;
 
     //=========================================================================
-    // Sample program: simple GEMM, ARRAY_SIZE=8, DATA_WIDTH=8, DMA_WIDTH=64.
+    // CHANGE — power-on/reset default content.
     //
-    //   A = [1 2]   B = [5 6]   C = A x B = [19 22]
-    //       [3 4]       [7 8]               [43 50]
+    // Previously this `initial` block loaded a fixed 11-instruction GEMM demo
+    // program (rom[0..10]) with rom[11..15] pre-set to END as padding. Now
+    // that `rom` is a CPU-writable instruction memory (see wr_en/wr_addr/
+    // wr_data below and REG_INSTR_ADDR/REG_INSTR_DATA/REG_PROG_LEN in
+    // axi4_lite_slave.sv), the *safety* default matters more than the demo
+    // content: every slot must decode as OP_END (32'h8000_0000, opcode=8,
+    // all other fields 0) at reset, not just the slots past some assumed
+    // program length. If a CPU forgets to fully (re)write the program before
+    // pulsing START — or writes a shorter program than a previous run left
+    // behind — fetch must terminate immediately/harmlessly instead of
+    // executing whatever instruction word happens to be sitting in an
+    // unwritten or stale slot.
     //
-    // A/B are zero-padded to 8x8 in DRAM before the run; only 2 of 8 possible
-    // output rows are computed. Weight tile W == B (weight-stationary array
-    // computes result_out[c] = sum_r act_in[r]*W[r][c] == C[row][c] when
-    // act_in is a row of A). Bias is loaded as all-zero (identity path);
-    // REG_VEC_CTRL defaults to mult=1/shift=0/act_type=0(passthrough), so no
-    // extra CSR write is needed for this program.
-    //
-    // At this ARRAY_SIZE/DATA_WIDTH/DMA_WIDTH combo, ELEMENTS_PER_BEAT =
-    // DMA_WIDTH/DATA_WIDTH = 8 = ARRAY_SIZE, so one DMA beat == one full row
-    // for both the weight tile and the activation tile (no partial-row/
-    // partial-beat accounting needed for this example).
-    //
-    // IMPORTANT — MATMUL/VECTOR are alternated per row (matmul(0), vector(0),
-    // matmul(1), vector(1)) rather than batched, because accum_buf_state is
-    // still single-banked (flagged as a known, unfixed limitation in the
-    // handoff) — a second MATMUL can't issue until the first row's VECTOR
-    // has drained the accum buffer.
-    //
-    // Byte layout: [opcode(4)|src(2)|dst(2)] [addr(8)] [length(8)] [accum_ctrl(2)|reserved(6)]
-    //   opcode: NOP=0 LOAD_WGT=1 LOAD_ACT=2 LOAD_BIAS=3 MATMUL=4 VECTOR=5 STORE=6 SWAP_WGT=7 END=8
-    //   accum_ctrl: NONE=0 INIT=1 ADD=2 LAST=3
-    //   addr semantics: DMA-beat index for LOAD_WGT/LOAD_ACT/LOAD_BIAS/STORE;
-    //                   row index for MATMUL/VECTOR.
-    //   length semantics: beats-1 (AxLEN convention) for LOAD_*/STORE.
-    //
-    //  0: NOP
-    //  1: LOAD_WGT   dst=0        addr=0x00 len=7   (8 beats = full 8x8 W tile, from weight_addr)
-    //  2: LOAD_ACT   dst=0        addr=0x00 len=1   (2 beats = rows 0,1 of A, from src_addr)
-    //  3: LOAD_BIAS               addr=0x00 len=3   (4 beats = 8 zero INT32 lanes, from bias_addr)
-    //  4: SWAP_WGT                                  (parks W tile into the array's weight_reg)
-    //  5: MATMUL     src=0        addr=0x00         accum_ctrl=NONE  (row 0: act row0 x W -> accum row0)
-    //  6: VECTOR           dst=0  addr=0x00                          (drain accum row0 -> out_buf[0] row0)
-    //  7: MATMUL     src=0        addr=0x01         accum_ctrl=NONE  (row 1: act row1 x W -> accum row1)
-    //  8: VECTOR           dst=0  addr=0x01                          (drain accum row1 -> out_buf[0] row1)
-    //  9: STORE      src=0        addr=0x00 len=1   (2 beats = 2 rows, out_buf[0] -> dst_addr)
-    // 10: END
-    initial begin
-        rom[0]  = 32'h00000000;  // NOP
-        rom[1]  = 32'h10000700;  // LOAD_WGT  dst=0 addr=0x00 len=7  (opcode=1)
-        rom[2]  = 32'h20000100;  // LOAD_ACT  dst=0 addr=0x00 len=1  (opcode=2)
-        rom[3]  = 32'h30000300;  // LOAD_BIAS       addr=0x00 len=3  (opcode=3)
-        rom[4]  = 32'h70000000;  // SWAP_WGT                          (opcode=7)
-        rom[5]  = 32'h40000000;  // MATMUL    src=0 addr=0x00        accum_ctrl=NONE (opcode=4)
-        rom[6]  = 32'h50000000;  // VECTOR          dst=0 addr=0x00  (opcode=5)
-        rom[7]  = 32'h40010000;  // MATMUL    src=0 addr=0x01        accum_ctrl=NONE
-        rom[8]  = 32'h50010000;  // VECTOR          dst=0 addr=0x01
-        rom[9]  = 32'h60000100;  // STORE     src=0 addr=0x00 len=1  (opcode=6)
-        rom[10] = 32'h80000000;  // END                                (opcode=8)
-        rom[11] = 32'h80000000;  // padding — never reached (fetch_ptr stops advancing at OP_END, see control_unit fix)
-        rom[12] = 32'h80000000;
-        rom[13] = 32'h80000000;
-        rom[14] = 32'h80000000;
-        rom[15] = 32'h80000000;
+    // So: `rom` is now synchronously reset to all-END in the same always_ff
+    // block that already handles window/fetch_ptr reset below (single reset
+    // domain, no separate initial block content is relied on for correctness
+    // in simulation or on real silicon — `initial` alone is not synthesizable
+    // reset behavior on an ASIC flow anyway, only on FPGA BRAM initial
+    // values). The old GEMM demo program content is dropped entirely: it is
+    // no longer needed as a "default program" now that the CPU is expected
+    // to program instruction memory itself before every run, and keeping it
+    // around as reset content would silently mask a CPU that forgot to write
+    // REG_PROG_LEN / the instruction stream (it would appear to "work" by
+    // running the stale demo instead of visibly doing nothing / hitting END
+    // immediately).
+    //=========================================================================
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            // NEW — reset every slot to OP_END (32'h8000_0000) rather than
+            // relying on `initial` content. See comment block above.
+            for (int i = 0; i < INSTR_DEPTH; i++) begin
+                rom[i] <= 32'h8000_0000;
+            end
+        end
+        else if (wr_en) begin
+            // NEW — CPU write port. One word per pulse. Deliberately does not
+            // interact with pop_en/restart in this same cycle beyond normal
+            // Verilog non-blocking-assignment semantics: if wr_en and pop_en
+            // both happen to be asserted the same cycle (shouldn't occur —
+            // wr_en is gated with !busy upstream, and pop_en only asserts
+            // while busy — see hazard notes in the proposal doc), the write
+            // still lands in `rom` this cycle and the *next* pop_en's
+            // rom[fetch_ptr] read (a cycle later) will already observe it;
+            // the in-flight `window` shift below reads the OLD rom via a
+          // separate always_ff (see below), so no same-cycle read/write
+            // collision on the same memory word is possible in the intended
+            // usage (write-while-idle, pop-while-busy never overlap).
+            rom[wr_addr] <= wr_data;
+        end
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
