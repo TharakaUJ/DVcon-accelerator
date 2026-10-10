@@ -143,9 +143,9 @@ module accelerator #(
 
     // systolic array interface
     logic array_en, array_clear_acc, array_weight_load;
-    logic signed [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
-    logic signed [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
-    logic signed [31:0] array_result_out [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [31:0] array_result_out [0:SYSTOLIC_ARRAY_ROWS-1];
     logic [31:0] array_result_valid; // havent used yet
     logic [31:0] array_perf_cycles; // havent used yet
     logic array_perf_valid;
@@ -158,13 +158,13 @@ module accelerator #(
     localparam int ACC_W = 32;         // matches vector_unit's ACC_W localparam
     logic accum_wr_en, accum_wr_init, accum_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] accum_wr_addr, accum_rd_addr;
-    logic signed [ACC_W-1:0] accum_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [ACC_W-1:0] accum_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
     logic accum_rd_valid;
 
     // bram bias buffer interface (NEW)
     logic bias_wr_en, bias_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*ACC_W/64)-1:0] bias_wr_addr;
-    logic signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
     logic bias_rd_valid;
 
     // FIX — bias_addr is now a real, independently-settable AXI-lite
@@ -180,12 +180,12 @@ module accelerator #(
     logic [4:0] vector_requant_shift; // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
     logic [1:0] vector_act_type;      // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
     logic vector_out_valid; // havent used yet
-    logic signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
 
     // instruction fifo interface
     logic fifo_pop_en;
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx;
-    logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
+    wire [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
 
     // control unit interface
     logic loading_weights, streaming_acts, weight_swap;
