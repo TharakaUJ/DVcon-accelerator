@@ -40,4 +40,22 @@ DVCon_2026/*
 
 
 yoloe_compiler/examples/*
-yoloe_compiler/tests/*
+# yoloe_compiler: generated outputs (build/ is already ignored above)
+yoloe_compiler/runtime/**/*.o
+yoloe_compiler/runtime/yoloe_runtime
+yoloe_compiler/runtime/yoloe_detect
+yoloe_compiler/reference/
+yoloe_compiler/out/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Claude Code / AI assistant files (local only, never commit)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json

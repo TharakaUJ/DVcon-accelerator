@@ -24,13 +24,26 @@ import onnx
 import onnxruntime as ort
 
 
+def _elem_types(graph: onnx.GraphProto) -> dict[str, int]:
+    """tensor name -> ONNX elem_type, from shape-inferred value_info and initializers."""
+    types = {init.name: init.data_type for init in graph.initializer}
+    for vi in list(graph.input) + list(graph.output) + list(graph.value_info):
+        if vi.type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED:
+            types[vi.name] = vi.type.tensor_type.elem_type
+    return types
+
+
 def _all_outputs_model(model: onnx.ModelProto, names: set[str]) -> onnx.ModelProto:
+    # Outputs need a real elem_type: onnxruntime rejects UNDEFINED graph
+    # outputs ("Invalid tensor data type 0"), same as in dump_reference.py.
     m = onnx.ModelProto()
     m.CopyFrom(model)
+    types = _elem_types(m.graph)
     existing = {o.name for o in m.graph.output}
     for name in names:
         if name and name not in existing:
-            m.graph.output.append(onnx.helper.make_tensor_value_info(name, onnx.TensorProto.UNDEFINED, None))
+            elem_type = types.get(name, onnx.TensorProto.INT64)  # params are int64 (or float scales)
+            m.graph.output.append(onnx.helper.make_tensor_value_info(name, elem_type, None))
             existing.add(name)
     return m
 

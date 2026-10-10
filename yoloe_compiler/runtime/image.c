@@ -97,7 +97,8 @@ void letterbox_unmap_box(const letterbox_t *lb, double cx1, double cy1, double c
     double y1 = (cy1 - lb->pad_y) / lb->scale;
     double x2 = (cx2 - lb->pad_x) / lb->scale;
     double y2 = (cy2 - lb->pad_y) / lb->scale;
-    if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
     if (x2 > lb->orig_w) x2 = lb->orig_w;
     if (y2 > lb->orig_h) y2 = lb->orig_h;
     *ox1 = (int)round(x1); *oy1 = (int)round(y1);

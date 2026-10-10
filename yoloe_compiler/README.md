@@ -63,11 +63,46 @@ compile_yoloe.py       Top-level CLI: ONNX -> build/{instructions,tensors}.json
                         `--inspect-only` prints the model summary (op list,
                         shapes, dynamic-shape check) without compiling.
 
-examples/               tiny.onnx (synthetic 7-node test graph) +
-                        make_tiny_model.py to regenerate it. Bus.jpg is a
-                        real photo (from ultralytics' public assets) used
-                        for realistic-input verification runs.
+tests/                  pytest suite (see "Running the tests" below) +
+                        make_tiny_model.py, which generates the synthetic
+                        7-node tiny.onnx test graph.
+
+examples/               local-only (gitignored): tiny.onnx and bus.jpg (a
+                        real photo from ultralytics' public assets) for
+                        manual runs. Regenerate tiny.onnx with
+                        `python3 tests/make_tiny_model.py examples/tiny.onnx`.
 ```
+
+## Setup
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt     # numpy, onnx, onnxruntime, pytest
+make -C runtime                     # gcc + make; builds yoloe_runtime and yoloe_detect
+```
+
+## Running the tests
+
+```bash
+cd yoloe_compiler
+pytest                  # whole suite (~2 s); builds the C runtime automatically
+pytest -k runtime_ops   # just the per-operator C-vs-ONNXRuntime checks
+```
+
+| File | What it covers |
+|---|---|
+| `tests/test_extractor.py` | IR helpers, dependency graph / topological order, op attribute mapping, constant folding (incl. rejecting data-dependent values), `extract()` |
+| `tests/test_analysis.py` | liveness, memory planner (reuse, alignment, no same-instruction aliasing), schedule and memory-overlap validators |
+| `tests/test_runtime_ops.py` | ~45 small ONNX graphs, one per op/attribute variant, compiled and run through `yoloe_runtime`, every tensor compared against onnxruntime; plus the tiny model and a deep conv chain that stresses memory reuse |
+| `tests/test_cli.py` | the README command-line flows: `compile_yoloe.py` (incl. `--inspect-only` and unsupported ops), `dump_reference.py` → `yoloe_runtime` → `compare.py`, and `yoloe_detect` on a synthetic detection model |
+
+`test_known_gap` cases in `test_runtime_ops.py` are marked
+`xfail(strict=True)`: they document confirmed limitations (listed under
+"Known gaps" below). When one is fixed, its test starts passing and pytest
+reports it, so move that case into `CASES`.
+
+No real YOLOE model is in the repo, so the full-model verification below
+has to be run by hand with your own `.onnx`.
 
 ## Quick start: pure-C object detection (image in, detections out)
 
@@ -146,7 +181,9 @@ python3 verification/compare.py \
    written is a use-after-free-style correctness bug (it caused a real
    segfault during development, traced to corrupted int64 indices).
    `analysis/memory_planner.py`'s `release_expired` only frees tensors
-   whose `discard_after < current_instruction`, not `<=`.
+   whose `discard_after < current_instruction`, not `<=`, and
+   `analysis/graph_validation.py`'s overlap check treats lifetimes as
+   inclusive so it actually catches a violation of this rule.
 
 3. **Elementwise binops (Add/Sub/Mul/Div) must dispatch on tensor dtype.**
    YOLOE's detect head does real int64 arithmetic (e.g. dividing flattened
@@ -177,6 +214,12 @@ python3 verification/compare.py \
    `verification/dump_reference.py` also writes a `weights.bin` but only as
    a side effect of generating ground-truth data for `compare.py`.
 
+7. **Constant folding must give onnxruntime real output dtypes.** Recent
+   onnxruntime versions reject graph outputs declared as UNDEFINED
+   ("Invalid tensor data type 0"), which broke compiling any model with a
+   Slice/TopK/Tile/... parameter. `constant_folding.py` now takes each
+   candidate's dtype from shape inference, like `dump_reference.py` does.
+
 ## Verification status (yoloe-26n-seg, nano)
 
 445 instructions / 734 tensors extracted; memory planner cuts activation
@@ -194,11 +237,27 @@ the top-300 cutoff, not an implementation bug).
 
 - C kernels are unoptimized nested loops by design (spec: correctness
   before speed). Tiling/SIMD/threading/quantization are all future work.
-- Resize only implements nearest-neighbor (sufficient for this model's
-  Upsample-equivalent nodes); bilinear is unimplemented.
-- Einsum only supports the exact equation YOLOE uses
-  (`bchw,bkc->bkhw`) - fails loudly rather than attempting a generic
-  einsum evaluator, since no other equation appears in this model.
+- Ops with a Python handler in `extractor/operators.py` but no C kernel
+  (compile succeeds, `yoloe_runtime` fails at that instruction): LeakyRelu,
+  Pow, Sqrt, Clip, Exp, Tanh, Expand, Equal, Where, Shape, BatchNorm, Gemm,
+  GlobalAveragePool, ReduceSum/Mean, HardSigmoid, NMS.
+- Kernel limitations confirmed by `test_known_gap` (all fine for the
+  YOLOE export this was verified on, but wrong for other graphs):
+  - Resize: nearest only, and always floors - `nearest_mode` is ignored, so
+    the ONNX default (`half_pixel` + `round_prefer_floor`) gives wrong
+    results. YOLO exports use `asymmetric` + `floor`, which is correct.
+    Bilinear is unimplemented.
+  - MatMul: broadcasts an operand with fewer dims, but not a size-1 batch dim.
+  - TopK: always the last axis and largest=1.
+  - ReduceMax: omitting `axes` (reduce all) reduces nothing.
+  - Concat (and Split/Transpose, same pattern) copy float32-sized elements,
+    so int64 tensors are corrupted.
+  - Einsum: only `bchw,bkc->bkhw` (fails loudly otherwise).
+- Constant-node outputs consumed at runtime are never written to
+  weights.bin, so they read as zeros (`compile_yoloe.py` warns).
+- A Shape/Gather subgraph that only feeds a folded parameter (e.g. Slice
+  `ends`) is still emitted as instructions, and SHAPE has no C kernel.
+  Exporting with onnx-simplifier avoids this.
 - No FPGA backend yet - that's the explicit next phase once this reference
   path is fully trusted (see spec section 22: the instruction stream itself
   should not need to change when the C backend is swapped for an FPGA one).

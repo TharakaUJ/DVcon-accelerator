@@ -64,8 +64,10 @@ def validate_no_memory_overlap(tensors: dict[str, Tensor]) -> None:
             for j in range(i + 1, len(live)):
                 b = live[j]
                 b_start, b_end = b.producer, (b.discard_after if b.discard_after is not None else float("inf"))
-                # do lifetimes overlap?
-                if a_start >= b_end or b_start >= a_end:
+                # do lifetimes overlap? Inclusive: a tensor is still being read
+                # by its discard_after instruction, so it must not share memory
+                # with that instruction's outputs (memory_planner design rule).
+                if a_start > b_end or b_start > a_end:
                     continue
                 b0, b1 = b.memory_offset, b.memory_offset + (b.size_bytes or 0)
                 # do memory ranges overlap?

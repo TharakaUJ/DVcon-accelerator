@@ -26,7 +26,7 @@ const char *opcode_to_string(ir_opcode_t op) {
     return OPCODE_NAMES[op];
 }
 
-/* ---- forward decls for op kernels (in ops/*.c) ---------------------------- */
+/* ---- forward decls for op kernels (in ops/) -------------------------------- */
 int execute_conv(ir_program_t *prog, ir_instruction_t *instr);
 int execute_add(ir_program_t *prog, ir_instruction_t *instr);
 int execute_sub(ir_program_t *prog, ir_instruction_t *instr);

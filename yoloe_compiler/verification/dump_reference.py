@@ -2,8 +2,9 @@
 """
 Runs the original ONNX model (via onnxruntime) and dumps:
   - every intermediate tensor as reference/<tensor_name>.npy   (spec section 13)
-  - weights.bin: raw float32 concatenation of every WEIGHT/BIAS tensor,
-    ID-sorted exactly like tensors.json (so runtime/main.c can mmap them in)
+  - weights.bin: raw native-dtype concatenation of every WEIGHT/BIAS tensor,
+    ID-sorted exactly like tensors.json (identical to the one compile_yoloe.py
+    writes; kept so this script is self-contained)
   - input.bin: raw float32 dump of the model input, in the same order
   - a name_map.json so the C-side tensor ids can be matched back to .npy files
 

@@ -59,7 +59,6 @@ def print_inspection(summary: dict) -> None:
     print()
     print(f"Unique ONNX operators ({len(summary['unique_ops'])}):")
     for op in summary["unique_ops"]:
-        flag = "" if op in summary.get("unsupported_ops", []) is False else ""
         supported = op not in summary["unsupported_ops"]
         mark = "OK" if supported else "MISSING HANDLER"
         print(f"    {summary['op_counts'][op]:>4}x  {op:<24} [{mark}]")
