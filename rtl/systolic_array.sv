@@ -257,10 +257,19 @@ module systolic_array #(
 
                 PM_DONE: begin
                     if (clear_acc) begin
-                        pm_state    <= PM_IDLE;
                         perf_valid  <= 1'b0;
-                        perf_cycles <= 32'd0;
                         col_seen    <= {COLS{1'b0}};
+                        // The next MATMUL's en arrives together with clear_acc
+                        // (control_unit pulses both on act_rd_valid). Start
+                        // tracking it right away; going via PM_IDLE would miss
+                        // this single-cycle en and never raise perf_valid.
+                        if (en) begin
+                            pm_state    <= PM_RUNNING;
+                            perf_cycles <= 32'd1;
+                        end else begin
+                            pm_state    <= PM_IDLE;
+                            perf_cycles <= 32'd0;
+                        end
                     end
                 end
 
