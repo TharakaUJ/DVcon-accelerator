@@ -14,9 +14,9 @@ Source of truth (control_unit.sv, ~line 203-217):
         logic [5:0]    reserved;    // [5:0]    6 bits
     } instruction_t;
 
-opcode_t (control_unit.sv ~line 153-163):
+opcode_t (control_unit.sv):
     NOP=0 LOAD_WGT=1 LOAD_ACT=2 LOAD_BIAS=3 MATMUL=4 VECTOR=5 STORE=6
-    SWAP_WGT=7 END=8
+    SWAP_WGT=7 END=8 SET_BASE=9
 
 accum_ctrl_t (control_unit.sv ~line 176-181):
     NONE=0 INIT=1 ADD=2 LAST=3
@@ -55,6 +55,11 @@ dispatch block, ~line 641-780):
   SWAP_WGT : no fields consumed
   END      : no fields consumed
   NOP      : no fields consumed
+  SET_BASE : dst   which DMA base offset to set (Base: WGT/ACT/BIAS/OUT)
+             bits [23:0] (addr|length|accum_ctrl|reserved) = offset in DMA
+                   beats; every later LOAD_*/STORE on that base addresses
+                   CSR_base + offset*beat_bytes + (addr << beat shift).
+                   Offsets reset to 0 at START.
 
 FLAG (unclear / worth confirming against RTL sim, not assumed further
 here): MATMUL.dst and VECTOR.src are present in the encoding and set to 0
@@ -78,6 +83,18 @@ class Opcode(IntEnum):
     STORE = 6
     SWAP_WGT = 7
     END = 8
+    SET_BASE = 9
+
+
+class Base(IntEnum):
+    """SET_BASE dst: which DMA base offset (control_unit.sv BASE_*)."""
+    WGT = 0
+    ACT = 1
+    BIAS = 2
+    OUT = 3
+
+
+SET_BASE_MAX_BEATS = (1 << 24) - 1
 
 
 class AccumCtrl(IntEnum):
@@ -171,3 +188,16 @@ def SWAP_WGT() -> Instruction:
 
 def END() -> Instruction:
     return Instruction(Opcode.END)
+
+def SET_BASE(base: Base, offset_beats: int) -> Instruction:
+    """Set a DMA base offset; the 24-bit immediate spans addr|length|accum_ctrl|reserved."""
+    assert 0 <= offset_beats <= SET_BASE_MAX_BEATS, f"SET_BASE offset is 24 bits (beats): {offset_beats}"
+    return Instruction(Opcode.SET_BASE, dst=int(base),
+                       addr=(offset_beats >> 16) & 0xFF,
+                       length=(offset_beats >> 8) & 0xFF,
+                       accum_ctrl=AccumCtrl((offset_beats >> 6) & 0x3),
+                       reserved=offset_beats & 0x3F)
+
+def set_base_offset(ins: Instruction) -> int:
+    """Inverse of SET_BASE(): the 24-bit beat offset."""
+    return (ins.addr << 16) | (ins.length << 8) | (int(ins.accum_ctrl) << 6) | ins.reserved
