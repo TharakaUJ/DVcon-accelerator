@@ -11,7 +11,9 @@ static const char *OPCODE_NAMES[OP_COUNT] = {
     "MAXPOOL", "AVGPOOL", "MATMUL", "GEMM", "SOFTMAX", "BATCHNORM",
     "SLICE", "CAST", "GATHER", "UNSQUEEZE", "SQUEEZE", "FLATTEN",
     "REDUCEMAX", "TILE", "TOPK", "CONVTRANSPOSE", "EINSUM",
-    "GATHERELEMENTS", "MOD"
+    "GATHERELEMENTS", "MOD", "EXP", "TANH", "SQRT", "POW", "CLIP",
+    "HARDSIGMOID", "GLOBALAVGPOOL", "REDUCESUM", "REDUCEMEAN", "EXPAND",
+    "EQUAL", "WHERE", "SHAPE"
 };
 
 ir_opcode_t opcode_from_string(const char *s) {
@@ -57,6 +59,22 @@ int execute_gather(ir_program_t *prog, ir_instruction_t *instr);
 int execute_gatherelements(ir_program_t *prog, ir_instruction_t *instr);
 int execute_mod(ir_program_t *prog, ir_instruction_t *instr);
 int execute_einsum(ir_program_t *prog, ir_instruction_t *instr);
+int execute_leakyrelu(ir_program_t *prog, ir_instruction_t *instr);
+int execute_exp(ir_program_t *prog, ir_instruction_t *instr);
+int execute_tanh(ir_program_t *prog, ir_instruction_t *instr);
+int execute_sqrt(ir_program_t *prog, ir_instruction_t *instr);
+int execute_pow(ir_program_t *prog, ir_instruction_t *instr);
+int execute_clip(ir_program_t *prog, ir_instruction_t *instr);
+int execute_hardsigmoid(ir_program_t *prog, ir_instruction_t *instr);
+int execute_globalavgpool(ir_program_t *prog, ir_instruction_t *instr);
+int execute_reducesum(ir_program_t *prog, ir_instruction_t *instr);
+int execute_reducemean(ir_program_t *prog, ir_instruction_t *instr);
+int execute_expand(ir_program_t *prog, ir_instruction_t *instr);
+int execute_equal(ir_program_t *prog, ir_instruction_t *instr);
+int execute_where(ir_program_t *prog, ir_instruction_t *instr);
+int execute_shape(ir_program_t *prog, ir_instruction_t *instr);
+int execute_gemm(ir_program_t *prog, ir_instruction_t *instr);
+int execute_batchnorm(ir_program_t *prog, ir_instruction_t *instr);
 
 /* ---- tensor lookup ---------------------------------------------------- */
 
@@ -168,6 +186,27 @@ static void load_instruction_attrs(ir_instruction_t *instr, cJSON *attrs) {
     if ((v = cJSON_GetObjectItem(attrs, "axis"))) instr->axis = (int64_t)cJSON_GetNumberValue(v);
     if ((v = cJSON_GetObjectItem(attrs, "alpha"))) instr->alpha = cJSON_GetNumberValue(v);
     if ((v = cJSON_GetObjectItem(attrs, "ceil_mode"))) instr->ceil_mode = (int64_t)cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "beta"))) instr->beta = cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "transA"))) instr->trans_a = (int64_t)cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "transB"))) instr->trans_b = (int64_t)cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "epsilon"))) instr->epsilon = cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "largest"))) instr->topk_largest = (int64_t)cJSON_GetNumberValue(v);
+    else instr->topk_largest = 1;
+
+    /* Clip min/max: folded scalar inputs (may arrive as 1-element lists) or attributes */
+    if ((v = cJSON_GetObjectItem(attrs, "min"))) {
+        instr->clip_min = cJSON_GetNumberValue(cJSON_IsArray(v) ? cJSON_GetArrayItem(v, 0) : v);
+        instr->has_clip_min = 1;
+    }
+    if ((v = cJSON_GetObjectItem(attrs, "max"))) {
+        instr->clip_max = cJSON_GetNumberValue(cJSON_IsArray(v) ? cJSON_GetArrayItem(v, 0) : v);
+        instr->has_clip_max = 1;
+    }
+    if ((v = cJSON_GetObjectItem(attrs, "start"))) instr->shape_start = (int64_t)cJSON_GetNumberValue(v);
+    if ((v = cJSON_GetObjectItem(attrs, "end"))) {
+        instr->shape_end = (int64_t)cJSON_GetNumberValue(v);
+        instr->has_shape_end = 1;
+    }
 
     /* Slice: starts/ends/axes/steps folded to plain int arrays (may be
      * scalar-wrapped-as-list of length 1, per _to_py in instructions.py) */
@@ -361,6 +400,22 @@ int execute_instruction(ir_program_t *prog, ir_instruction_t *instr) {
         case OP_GATHERELEMENTS:                                             return execute_gatherelements(prog, instr);
         case OP_MOD:                                                          return execute_mod(prog, instr);
         case OP_EINSUM:                                                         return execute_einsum(prog, instr);
+        case OP_LEAKYRELU:     return execute_leakyrelu(prog, instr);
+        case OP_EXP:           return execute_exp(prog, instr);
+        case OP_TANH:          return execute_tanh(prog, instr);
+        case OP_SQRT:          return execute_sqrt(prog, instr);
+        case OP_POW:           return execute_pow(prog, instr);
+        case OP_CLIP:          return execute_clip(prog, instr);
+        case OP_HARDSIGMOID:   return execute_hardsigmoid(prog, instr);
+        case OP_GLOBALAVGPOOL: return execute_globalavgpool(prog, instr);
+        case OP_REDUCESUM:     return execute_reducesum(prog, instr);
+        case OP_REDUCEMEAN:    return execute_reducemean(prog, instr);
+        case OP_EXPAND:        return execute_expand(prog, instr);
+        case OP_EQUAL:         return execute_equal(prog, instr);
+        case OP_WHERE:         return execute_where(prog, instr);
+        case OP_SHAPE:         return execute_shape(prog, instr);
+        case OP_GEMM:          return execute_gemm(prog, instr);
+        case OP_BATCHNORM:     return execute_batchnorm(prog, instr);
         default:
             fprintf(stderr, "execute_instruction: unimplemented opcode '%s' "
                     "(instruction %d, node '%s')\n",

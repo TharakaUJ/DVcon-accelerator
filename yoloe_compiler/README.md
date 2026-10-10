@@ -19,7 +19,8 @@ ONNX  ->  extraction (Python)  ->  instructions.json + tensors.json
 
 ```
 extractor/       ONNX -> IR. onnx_loader, graph (dependency/topo-sort),
-                  operators (op_type -> IR primitive map, 26 ops covered),
+                  operators (op_type -> IR primitive map, 49 ONNX ops;
+                  all but NonMaxSuppression have a C kernel),
                   tensors (shape/dtype/layout/kind), instructions
                   (+ constant_folding.py: resolves shape-only "parameter"
                   tensors like Slice starts/ends into attributes, with an
@@ -92,14 +93,12 @@ pytest -k runtime_ops   # just the per-operator C-vs-ONNXRuntime checks
 | File | What it covers |
 |---|---|
 | `tests/test_extractor.py` | IR helpers, dependency graph / topological order, op attribute mapping, constant folding (incl. rejecting data-dependent values), `extract()` |
-| `tests/test_analysis.py` | liveness, memory planner (reuse, alignment, no same-instruction aliasing), schedule and memory-overlap validators |
-| `tests/test_runtime_ops.py` | ~45 small ONNX graphs, one per op/attribute variant, compiled and run through `yoloe_runtime`, every tensor compared against onnxruntime; plus the tiny model and a deep conv chain that stresses memory reuse |
+| `tests/test_analysis.py` | liveness, memory planner (reuse, alignment, no same-instruction aliasing), schedule, memory-overlap and static-shape validators |
+| `tests/test_runtime_ops.py` | ~85 small ONNX graphs, one per op/attribute variant, compiled and run through `yoloe_runtime`, every tensor compared against onnxruntime; plus the tiny model and a deep conv chain that stresses memory reuse |
 | `tests/test_cli.py` | the README command-line flows: `compile_yoloe.py` (incl. `--inspect-only` and unsupported ops), `dump_reference.py` → `yoloe_runtime` → `compare.py`, and `yoloe_detect` on a synthetic detection model |
 
-`test_known_gap` cases in `test_runtime_ops.py` are marked
-`xfail(strict=True)`: they document confirmed limitations (listed under
-"Known gaps" below). When one is fixed, its test starts passing and pytest
-reports it, so move that case into `CASES`.
+To add a case, add an entry to `CASES` in `tests/test_runtime_ops.py`
+(nodes, input shape, output, initializers); the harness does the rest.
 
 No real YOLOE model is in the repo, so the full-model verification below
 has to be run by hand with your own `.onnx`.
@@ -220,6 +219,13 @@ python3 verification/compare.py \
    Slice/TopK/Tile/... parameter. `constant_folding.py` now takes each
    candidate's dtype from shape inference, like `dump_reference.py` does.
 
+8. **Constant-node outputs are data, not just parameters.** They live in
+   the WEIGHT region and are written to weights.bin with the initializers
+   (`weights_writer.py` checks each tensor's byte count, since the C loader
+   reads them back in the same order by `size_bytes`). Instructions whose
+   results are only used as folded parameters (e.g. a Shape -> Gather
+   chain computing Slice `ends`) are removed by `remove_dead_instructions`.
+
 ## Verification status (yoloe-26n-seg, nano)
 
 445 instructions / 734 tensors extracted; memory planner cuts activation
@@ -237,27 +243,25 @@ the top-300 cutoff, not an implementation bug).
 
 - C kernels are unoptimized nested loops by design (spec: correctness
   before speed). Tiling/SIMD/threading/quantization are all future work.
-- Ops with a Python handler in `extractor/operators.py` but no C kernel
-  (compile succeeds, `yoloe_runtime` fails at that instruction): LeakyRelu,
-  Pow, Sqrt, Clip, Exp, Tanh, Expand, Equal, Where, Shape, BatchNorm, Gemm,
-  GlobalAveragePool, ReduceSum/Mean, HardSigmoid, NMS.
-- Kernel limitations confirmed by `test_known_gap` (all fine for the
-  YOLOE export this was verified on, but wrong for other graphs):
-  - Resize: nearest only, and always floors - `nearest_mode` is ignored, so
-    the ONNX default (`half_pixel` + `round_prefer_floor`) gives wrong
-    results. YOLO exports use `asymmetric` + `floor`, which is correct.
-    Bilinear is unimplemented.
-  - MatMul: broadcasts an operand with fewer dims, but not a size-1 batch dim.
-  - TopK: always the last axis and largest=1.
-  - ReduceMax: omitting `axes` (reduce all) reduces nothing.
-  - Concat (and Split/Transpose, same pattern) copy float32-sized elements,
-    so int64 tensors are corrupted.
-  - Einsum: only `bchw,bkc->bkhw` (fails loudly otherwise).
-- Constant-node outputs consumed at runtime are never written to
-  weights.bin, so they read as zeros (`compile_yoloe.py` warns).
-- A Shape/Gather subgraph that only feeds a folded parameter (e.g. Slice
-  `ends`) is still emitted as instructions, and SHAPE has no C kernel.
-  Exporting with onnx-simplifier avoids this.
+- NonMaxSuppression has an IR handler but no C kernel (compile succeeds,
+  `yoloe_runtime` fails at that instruction).
+- Remaining kernel limitations (each fails loudly unless noted):
+  - Resize: `nearest` and `linear` on 4D NCHW (H/W only); `cubic`,
+    antialias, `extrapolation_value` and `keep_aspect_ratio_policy` are not
+    implemented (the last three are silently ignored).
+  - MatMul: 1-D operands are not implemented.
+  - Unary activations (Relu, Sigmoid, Clip, Exp, ...) are float32 only;
+    Add/Sub/Mul/Div need both inputs float32 or both int64, and int64 Div
+    truncates toward zero.
+  - Einsum: no ellipsis (`...`). Equations other than YOLOE's
+    `bchw,bkc->bkhw` use a slow generic loop.
+  - ConvTranspose ignores `dilations`; pooling ignores `ceil_mode` beyond
+    the output shape and `count_include_pad` (untested).
+- Tensor shapes that ONNX shape inference cannot resolve (e.g. computed via
+  Shape -> Gather -> Slice) are taken from one onnxruntime run at compile
+  time, which assumes the model's shapes don't depend on pixel data
+  (true for every supported op). A tensor still unresolved after that fails
+  compilation (`validate_static_shapes`).
 - No FPGA backend yet - that's the explicit next phase once this reference
   path is fully trusted (see spec section 22: the instruction stream itself
   should not need to change when the C backend is swapped for an FPGA one).

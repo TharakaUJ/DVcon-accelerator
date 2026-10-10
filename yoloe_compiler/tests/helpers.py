@@ -43,7 +43,8 @@ def make_model(nodes, inputs, outputs, initializers=(), opset: int = OPSET) -> o
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)])
     model.ir_version = 8
-    model = onnx.shape_inference.infer_shapes(model, strict_mode=True)  # fills output shapes left as None
+    # fills output shapes left as None (data_prop: shapes computed via Shape/Gather)
+    model = onnx.shape_inference.infer_shapes(model, strict_mode=True, data_prop=True)
     onnx.checker.check_model(model)
     return model
 

@@ -1,5 +1,6 @@
 #include "../runtime.h"
 #include <stdio.h>
+#include <math.h>
 
 /*
  * Straightforward nested-loop Conv2D. NOT optimized (spec section 11:
@@ -63,5 +64,31 @@ int execute_conv(ir_program_t *prog, ir_instruction_t *instr) {
         }
     }
     (void)pad_bottom; (void)pad_right; /* used implicitly via OH/OW from shape inference */
+    return 0;
+}
+
+/* BatchNormalization (inference): y = scale * (x - mean) / sqrt(var + eps) + B,
+ * per channel (axis 1). Inputs: X, scale, B, mean, var. */
+int execute_batchnorm(ir_program_t *prog, ir_instruction_t *instr) {
+    if (instr->num_inputs < 5) { fprintf(stderr, "BATCHNORM: expected 5 inputs\n"); return -1; }
+    ir_tensor_t *x = runtime_find_tensor(prog, instr->inputs[0]);
+    ir_tensor_t *scale = runtime_find_tensor(prog, instr->inputs[1]);
+    ir_tensor_t *b = runtime_find_tensor(prog, instr->inputs[2]);
+    ir_tensor_t *mean = runtime_find_tensor(prog, instr->inputs[3]);
+    ir_tensor_t *var = runtime_find_tensor(prog, instr->inputs[4]);
+    ir_tensor_t *out = runtime_find_tensor(prog, instr->outputs[0]);
+    if (!x || !scale || !b || !mean || !var || !out) { fprintf(stderr, "BATCHNORM: missing tensor\n"); return -1; }
+
+    int64_t N = x->shape[0], C = x->shape[1];
+    int64_t inner = tensor_numel(x) / (N * C);
+    for (int64_t n = 0; n < N; n++) {
+        for (int64_t c = 0; c < C; c++) {
+            double k = scale->data[c] / sqrt((double)var->data[c] + instr->epsilon);
+            double shift = b->data[c] - k * mean->data[c];
+            const float *src = x->data + (n * C + c) * inner;
+            float *dst = out->data + (n * C + c) * inner;
+            for (int64_t i = 0; i < inner; i++) dst[i] = (float)(k * src[i] + shift);
+        }
+    }
     return 0;
 }

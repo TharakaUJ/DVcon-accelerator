@@ -5,6 +5,7 @@ tensor has a known shape/dtype before IR extraction begins.
 
 from __future__ import annotations
 
+import numpy as np
 import onnx
 from onnx import shape_inference, numpy_helper
 
@@ -27,7 +28,9 @@ class LoadedModel:
         self.path = path
         model = onnx.load(path)
         try:
-            model = shape_inference.infer_shapes(model, strict_mode=False)
+            # data_prop: resolve shapes that depend on Shape/Gather/... values
+            # (e.g. a Slice whose `ends` is computed from the input's shape)
+            model = shape_inference.infer_shapes(model, strict_mode=False, data_prop=True)
         except Exception as e:  # shape inference can fail on some graphs; keep going
             print(f"[onnx_loader] WARNING: shape_inference.infer_shapes failed: {e}")
         onnx.checker.check_model(model, full_check=False)
@@ -100,3 +103,21 @@ class LoadedModel:
 
     def get_initializer_array(self, name: str):
         return numpy_helper.to_array(self.initializers[name])
+
+    def get_constant_array(self, name: str):
+        """Value of a tensor that is known at compile time: an initializer or
+        the output of a Constant node."""
+        if name in self.initializers:
+            return self.get_initializer_array(name)
+        for node in self.graph.node:
+            if node.op_type == "Constant" and node.output and node.output[0] == name:
+                attr = node.attribute[0]
+                value = onnx.helper.get_attribute_value(attr)
+                if attr.name in ("value", "sparse_value"):
+                    return numpy_helper.to_array(value)
+                if attr.name in ("value_float", "value_floats"):
+                    return np.array(value, dtype=np.float32)
+                if attr.name in ("value_int", "value_ints"):
+                    return np.array(value, dtype=np.int64)
+                raise ValueError(f"Constant node {node.name!r}: unsupported attribute {attr.name!r}")
+        raise KeyError(f"{name!r} is neither an initializer nor a Constant-node output")

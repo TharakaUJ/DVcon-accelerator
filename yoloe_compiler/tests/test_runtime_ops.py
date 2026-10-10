@@ -126,6 +126,92 @@ CASES = {
 }
 
 
+# Cases for kernels/attribute variants added after the first test pass
+# (several were previously known gaps).
+X1 = [1, 3, 4, 5]
+CASES.update({
+    # resize modes
+    "resize_nearest_half_pixel_round_prefer_floor": (
+        [node("Resize", ["x", "", "sc"], ["y"], mode="nearest")], X4, ("y", F, None),
+        [init("sc", np.array([1, 1, 2, 2], np.float32))]),
+    "resize_nearest_round_prefer_ceil_x3": (
+        [node("Resize", ["x", "", "sc"], ["y"], mode="nearest", nearest_mode="round_prefer_ceil")], X1,
+        ("y", F, None), [init("sc", np.array([1, 1, 3, 3], np.float32))]),
+    "resize_nearest_downscale_sizes": (
+        [node("Resize", ["x", "", "", "sz"], ["y"], mode="nearest")], X4, ("y", F, None),
+        [init("sz", i64([1, 4, 4, 3]))]),
+    "resize_linear_half_pixel": (
+        [node("Resize", ["x", "", "sc"], ["y"], mode="linear")], X1, ("y", F, None),
+        [init("sc", np.array([1, 1, 2, 2], np.float32))]),
+    "resize_linear_align_corners": (
+        [node("Resize", ["x", "", "", "sz"], ["y"], mode="linear", coordinate_transformation_mode="align_corners")],
+        X1, ("y", F, None), [init("sz", i64([1, 3, 7, 9]))]),
+    "resize_linear_pytorch_half_pixel_down": (
+        [node("Resize", ["x", "", "sc"], ["y"], mode="linear", coordinate_transformation_mode="pytorch_half_pixel")],
+        X4, ("y", F, None), [init("sc", np.array([1, 1, 0.5, 0.5], np.float32))]),
+    # matmul broadcasting / gemm
+    "matmul_size1_batch_broadcast": ([node("MatMul", ["x", "m"], ["y"])], [2, 4, 6], ("y", F, None),
+                                     [init("m", w(1, 6, 3))]),
+    "matmul_4d_both_broadcast": ([node("MatMul", ["x", "m"], ["y"])], [2, 1, 4, 6], ("y", F, None),
+                                 [init("m", w(3, 6, 5))]),
+    "gemm_transb_bias": ([node("Gemm", ["x", "m", "c"], ["y"], transB=1, alpha=0.5, beta=2.0)], [3, 6],
+                         ("y", F, None), [init("m", w(4, 6)), init("c", w(4))]),
+    "gemm_transa_matrix_bias": ([node("Gemm", ["x", "m", "c"], ["y"], transA=1)], [6, 3], ("y", F, None),
+                                [init("m", w(6, 4)), init("c", w(3, 1))]),
+    # topk variants
+    "topk_axis1": ([node("TopK", ["x", "k"], ["v", "i"], axis=1)], X4, ("v", F, None), [init("k", i64([2]))]),
+    "topk_smallest": ([node("TopK", ["x", "k"], ["v", "i"], axis=-1, largest=0)], [2, 10], ("v", F, None),
+                      [init("k", i64([3]))]),
+    # reductions / pooling / norm
+    "reducemax_no_axes": ([node("ReduceMax", ["x"], ["y"], keepdims=1)], X4, ("y", F, None), []),
+    "reducesum_axes_input": ([node("ReduceSum", ["x", "ax"], ["y"], keepdims=0)], X4, ("y", F, None),
+                             [init("ax", i64([1, 3]))]),
+    "reducemean_spatial": ([node("ReduceMean", ["x"], ["y"], axes=[2, 3], keepdims=1)], X4, ("y", F, None), []),
+    "globalavgpool": ([node("GlobalAveragePool", ["x"], ["y"])], X4, ("y", F, None), []),
+    "batchnorm": ([node("BatchNormalization", ["x", "g", "b", "mu", "var"], ["y"], epsilon=1e-3)], X4,
+                  ("y", F, None), [init("g", w(4)), init("b", w(4)), init("mu", w(4)),
+                                   init("var", (np.abs(w(4)) + 0.1).astype(np.float32))]),
+    # activations / unary
+    "leakyrelu": ([node("LeakyRelu", ["x"], ["y"], alpha=0.1)], X4, ("y", F, None), []),
+    "exp_tanh": ([node("Exp", ["x"], ["e"]), node("Tanh", ["e"], ["y"])], X4, ("y", F, None), []),
+    "sqrt_of_relu": ([node("Relu", ["x"], ["r"]), node("Sqrt", ["r"], ["y"])], X4, ("y", F, None), []),
+    "hardsigmoid": ([node("HardSigmoid", ["x"], ["y"], alpha=0.25, beta=0.4)], X4, ("y", F, None), []),
+    "clip_min_max_inputs": ([node("Clip", ["x", "lo", "hi"], ["y"])], X4, ("y", F, None),
+                            [init("lo", np.float32(-0.5)), init("hi", np.float32(0.7))]),
+    "clip_max_only": ([node("Clip", ["x", "", "hi"], ["y"])], X4, ("y", F, None), [init("hi", np.float32(0.2))]),
+    "pow_scalar_exponent": ([node("Pow", ["x", "p"], ["y"])], X4, ("y", F, None), [init("p", np.float32(2.0))]),
+    # broadcast / select / shape
+    "expand": ([node("Expand", ["x", "shp"], ["y"])], [1, 4, 1, 6], ("y", F, None), [init("shp", i64([2, 4, 3, 6]))]),
+    "equal_where": ([node("Relu", ["x"], ["r"]), node("Equal", ["x", "r"], ["eq"]),
+                     node("Where", ["eq", "x", "neg"], ["y"])], X4, ("y", F, None), [init("neg", np.float32(-9.0))]),
+    "shape_as_data": ([node("Shape", ["x"], ["sh"]), node("Cast", ["sh"], ["y"], to=F)], X4, ("y", F, None), []),
+    "shape_start_end": ([node("Shape", ["x"], ["sh"], start=1, end=-1), node("Cast", ["sh"], ["y"], to=F)], X4,
+                        ("y", F, None), []),
+    "shape_derived_slice_end": ([node("Shape", ["x"], ["sh"]), node("Gather", ["sh", "i"], ["e"], axis=0),
+                                 node("Slice", ["x", "s", "e", "a"], ["y"])], X4, ("y", F, None),
+                                [init("i", i64([1])), init("s", i64([1])), init("a", i64([1]))]),
+    "constant_node_input": ([helper.make_node("Constant", [], ["c"], value=helper.make_tensor("v", F, [4, 1, 1], [1, 2, 3, 4])),
+                             node("Mul", ["x", "c"], ["y"])], X4, ("y", F, None), []),
+    "constant_node_value_floats": ([helper.make_node("Constant", [], ["c"], value_floats=[0.5, -1.0, 2.0, 3.0, 1.0, 0.0]),
+                                    node("Add", ["x", "c"], ["y"])], X4, ("y", F, None), []),
+    # int64 data movement (exact copies, values beyond float range of ints)
+    "int64_concat_split_transpose": (
+        [node("Mul", ["x", "big"], ["xb"]), node("Cast", ["xb"], ["xi"], to=I64),
+         node("Concat", ["xi", "xi"], ["ci"], axis=1), node("Split", ["ci"], ["s0", "s1"], axis=2),
+         node("Transpose", ["s1"], ["t"], perm=[2, 1, 0]), node("Cast", ["t"], ["y"], to=F)],
+        [1, 2, 4], ("y", F, None), [init("big", np.float32(1000.0))]),
+    "cast_to_bool_and_back": ([node("Relu", ["x"], ["r"]), node("Cast", ["r"], ["b"], to=TP.BOOL),
+                               node("Cast", ["b"], ["y"], to=F)], X4, ("y", F, None), []),
+    # einsum beyond the YOLOE fast path
+    "einsum_batched_matmul": ([node("Einsum", ["x", "m"], ["y"], equation="bij,jk->bik")], [2, 4, 6], ("y", F, None),
+                              [init("m", w(6, 3))]),
+    "einsum_implicit_transpose_sum": ([node("Einsum", ["x"], ["y"], equation="ijk")], [2, 3, 4], ("y", F, None), []),
+    "einsum_three_operands": ([node("Einsum", ["x", "a", "b"], ["y"], equation="ij,jk,kl->il")], [3, 4],
+                              ("y", F, None), [init("a", w(4, 5)), init("b", w(5, 2))]),
+    "einsum_trace_like": ([node("Einsum", ["x"], ["y"], equation="bii->b")], [2, 3, 3], ("y", F, None), []),
+})
+
+
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_op_matches_onnxruntime(case, tmp_path, runtime_built):
     nodes, in_shape, (out_name, out_type, out_shape), inits = CASES[case]
@@ -159,61 +245,5 @@ def test_memory_reuse_does_not_corrupt_long_chain(tmp_path, runtime_built):
     nodes.append(node("Concat", [skips[0], skips[5], prev], ["y"], axis=1))
     inits = [init(f"w{i}", w(4, 4, 3, 3) * 0.3) for i in range(12)]
     model = make_model(nodes, [("x", F, X4)], [("y", F, None)], inits)
-    result = run_e2e(model, str(tmp_path))
-    assert_matches(result)
-
-
-# Known gaps in the C runtime (confirmed by these tests). Each is xfail(strict):
-# when a gap gets fixed the test starts passing and pytest flags it, so move
-# the case into CASES above at that point.
-KNOWN_GAPS = {
-    "resize_nearest_half_pixel_round_prefer_floor": (
-        "resize.c always floors; ignores nearest_mode (ONNX default round_prefer_floor)",
-        [node("Resize", ["x", "", "sc"], ["y"], mode="nearest")], X4, ("y", F, None),
-        [init("sc", np.array([1, 1, 2, 2], np.float32))]),
-    "matmul_size1_batch_broadcast": (
-        "matmul.c only broadcasts operands with fewer dims, not size-1 batch dims",
-        [node("MatMul", ["x", "m"], ["y"])], [2, 4, 6], ("y", F, None), [init("m", w(1, 6, 3))]),
-    "constant_node_input": (
-        "Constant-node outputs are never written to weights.bin, so they read as zeros",
-        [helper.make_node("Constant", [], ["c"], value=helper.make_tensor("v", F, [1], [2.0])),
-         node("Mul", ["x", "c"], ["y"])], X4, ("y", F, None), []),
-    "shape_derived_slice_end": (
-        "the Shape/Gather subgraph feeding a folded param is still emitted; SHAPE has no C kernel",
-        [node("Shape", ["x"], ["sh"]), node("Gather", ["sh", "i"], ["e"], axis=0),
-         node("Slice", ["x", "s", "e", "a"], ["y"])], X4, ("y", F, None),
-        [init("i", i64([1])), init("s", i64([1])), init("a", i64([1]))]),
-    "leakyrelu": (
-        "LEAKYRELU opcode is registered but has no kernel",
-        [node("LeakyRelu", ["x"], ["y"], alpha=0.1)], X4, ("y", F, None), []),
-    "reducemax_no_axes": (
-        "reducemax.c reduces nothing when axes is omitted (ONNX: reduce all axes)",
-        [node("ReduceMax", ["x"], ["y"], keepdims=1)], X4, ("y", F, None), []),
-    "topk_axis1": (
-        "topk.c always works on the last axis",
-        [node("TopK", ["x", "k"], ["v", "i"], axis=1)], X4, ("v", F, None), [init("k", i64([2]))]),
-    "topk_smallest": (
-        "topk.c ignores largest=0",
-        [node("TopK", ["x", "k"], ["v", "i"], axis=-1, largest=0)], [2, 10], ("v", F, None),
-        [init("k", i64([3]))]),
-    "concat_int64": (
-        "concat.c copies sizeof(float) per element; int64 tensors are corrupted",
-        [node("Mul", ["x", "big"], ["xb"]), node("Cast", ["xb"], ["xi"], to=I64),
-         node("Concat", ["xi", "xi"], ["ci"], axis=1), node("Cast", ["ci"], ["y"], to=F)],
-        [1, 2, 3], ("y", F, None), [init("big", np.float32(1000.0))]),
-    "einsum_other_equation": (
-        "einsum.c only implements bchw,bkc->bkhw",
-        [node("Einsum", ["x", "m"], ["y"], equation="bij,jk->bik")], [2, 4, 6], ("y", F, None),
-        [init("m", w(6, 3))]),
-}
-
-
-@pytest.mark.parametrize("case", [
-    pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=KNOWN_GAPS[name][0]))
-    for name in sorted(KNOWN_GAPS)
-])
-def test_known_gap(case, tmp_path, runtime_built):
-    reason, nodes, in_shape, (out_name, out_type, out_shape), inits = KNOWN_GAPS[case]
-    model = make_model(nodes, [("x", F, in_shape)], [(out_name, out_type, out_shape)], inits)
     result = run_e2e(model, str(tmp_path))
     assert_matches(result)

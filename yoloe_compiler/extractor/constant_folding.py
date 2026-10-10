@@ -58,6 +58,23 @@ def _run_once(model: onnx.ModelProto, input_name: str, input_shape: list[int], n
     return dict(zip(out_names, results))
 
 
+def resolve_shapes(
+    model: onnx.ModelProto,
+    input_name: str,
+    input_shape: list[int],
+    names: set[str],
+) -> dict[str, list[int]]:
+    """Actual shapes of `names` from one onnxruntime run, for tensors whose
+    shape ONNX shape inference could not resolve (e.g. a Slice whose `ends`
+    comes from a Shape -> Gather chain). With a static input shape and only
+    supported ops, every shape is input-independent."""
+    names = {n for n in names if n}
+    if not names:
+        return {}
+    run = _run_once(model, input_name, input_shape, names, seed=1)
+    return {name: list(run[name].shape) for name in names if name in run}
+
+
 def fold_candidate_tensors(
     model: onnx.ModelProto,
     input_name: str,

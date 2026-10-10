@@ -5,7 +5,8 @@ Constant nodes are folded directly into the tensor table (their output
 becomes a CONSTANT-kind tensor) rather than emitted as an executable
 instruction. Additionally, certain non-Constant-node inputs that are
 compile-time-constant "parameters" (Slice starts/ends/axes/steps, Tile
-repeats, Unsqueeze axes, Resize scales, TopK's k, Mod's divisor) are folded
+repeats, Unsqueeze axes, Resize scales, TopK's k, Mod's divisor, Clip's
+min/max) are folded
 into instruction attributes via constant_folding.py, so the C runtime never
 has to model them as generic dynamic tensor reads. See constant_folding.py
 for the correctness check (invariance across two different random inputs)
@@ -38,6 +39,7 @@ PARAM_INPUT_POSITIONS: dict[str, dict[int, str]] = {
     "TopK":       {1: "k"},
     "Mod":        {1: "divisor"},
     "Expand":     {1: "target_shape"},
+    "Clip":       {1: "min", 2: "max"},
 }
 
 
@@ -61,6 +63,25 @@ def _to_py(value) -> object:
     if arr.ndim == 0:
         return arr.item()
     return arr.tolist()
+
+
+def remove_dead_instructions(instructions: list[Instruction], graph_output_ids: set[str]) -> list[Instruction]:
+    """Drop instructions none of whose outputs is a graph output or consumed
+    by a remaining instruction (repeated until stable), then renumber ids.
+
+    After parameter folding, a Shape -> Gather -> ... subgraph that only
+    computed e.g. a Slice's `ends` is no longer read by anything at runtime;
+    this keeps it out of the instruction stream."""
+    live = list(instructions)
+    while True:
+        consumed = {tid for instr in live for tid in instr.inputs}
+        kept = [i for i in live if any(o in consumed or o in graph_output_ids for o in i.outputs)]
+        if len(kept) == len(live):
+            break
+        live = kept
+    for new_id, instr in enumerate(live):
+        instr.id = new_id
+    return live
 
 
 def build_instructions(

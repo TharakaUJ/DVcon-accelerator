@@ -7,6 +7,9 @@ Independent validation passes over the finished IR (spec section 18 and 21):
 
 2. validate_no_memory_overlap: no two simultaneously-live tensors may be
    assigned overlapping memory ranges within the same region.
+
+3. validate_static_shapes: every tensor an instruction reads or writes has
+   a fully resolved shape.
 """
 
 from __future__ import annotations
@@ -20,6 +23,24 @@ class ScheduleError(Exception):
 
 class MemoryOverlapError(Exception):
     pass
+
+
+class UnresolvedShapeError(Exception):
+    pass
+
+
+def validate_static_shapes(instructions: list[Instruction], tensors: dict[str, Tensor]) -> None:
+    """Every tensor the runtime touches needs a fully static shape: an
+    unresolved dim would give it size_bytes == 0 and no memory, and the
+    runtime would silently skip it."""
+    used = {tid for instr in instructions for tid in instr.inputs + instr.outputs}
+    bad = [f"{tid} ({tensors[tid].name}): {tensors[tid].shape}" for tid in sorted(used)
+           if any(not isinstance(d, int) or d < 0 for d in tensors[tid].shape)]
+    if bad:
+        raise UnresolvedShapeError(
+            f"{len(bad)} tensor(s) have shapes ONNX shape inference could not resolve: "
+            f"{bad[:10]}. The model must have static shapes (re-export with a fixed "
+            f"input size, or run onnx-simplifier).")
 
 
 def validate_instruction_order(instructions: list[Instruction], tensors: dict[str, Tensor]) -> None:

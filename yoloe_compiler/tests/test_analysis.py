@@ -131,3 +131,12 @@ def test_validate_no_memory_overlap_detects_conflict():
     tensors["t1"].memory_offset = tensors["t0"].memory_offset  # both live at instr 1
     with pytest.raises(MemoryOverlapError):
         validate_no_memory_overlap(tensors)
+
+
+def test_validate_static_shapes():
+    from analysis.graph_validation import UnresolvedShapeError, validate_static_shapes
+    instrs, tensors = _chain(2)
+    validate_static_shapes(instrs, tensors)
+    tensors["t1"].shape = [1, "unk__3"]
+    with pytest.raises(UnresolvedShapeError, match="t1"):
+        validate_static_shapes(instrs, tensors)

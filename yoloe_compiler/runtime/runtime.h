@@ -44,6 +44,19 @@ typedef enum {
     OP_EINSUM,
     OP_GATHERELEMENTS,
     OP_MOD,
+    OP_EXP,
+    OP_TANH,
+    OP_SQRT,
+    OP_POW,
+    OP_CLIP,
+    OP_HARDSIGMOID,
+    OP_GLOBALAVGPOOL,
+    OP_REDUCESUM,
+    OP_REDUCEMEAN,
+    OP_EXPAND,
+    OP_EQUAL,
+    OP_WHERE,
+    OP_SHAPE,
     OP_COUNT
 } ir_opcode_t;
 
@@ -113,6 +126,19 @@ typedef struct {
     double alpha;
     int64_t ceil_mode;
 
+    /* Gemm (alpha above), HardSigmoid (alpha/beta), BatchNorm (epsilon) */
+    double beta;
+    int64_t trans_a, trans_b;
+    double epsilon;
+
+    /* Clip: folded min/max (inputs) or legacy attributes; absent = unbounded */
+    double clip_min, clip_max;
+    int has_clip_min, has_clip_max;
+
+    /* Shape: optional start/end (opset 15) */
+    int64_t shape_start, shape_end;
+    int has_shape_end;
+
     /* Slice: folded starts/ends/axes/steps (spec: resolved at compile time
      * since this model has static shapes; see extractor/constant_folding.py) */
     int64_t slice_starts[IR_MAX_DIMS], slice_ends[IR_MAX_DIMS];
@@ -125,6 +151,7 @@ typedef struct {
     int64_t tile_repeats[IR_MAX_DIMS]; int tile_n;
 
     int64_t topk_k;
+    int64_t topk_largest;     /* 1 = largest (default), 0 = smallest */
     int64_t mod_divisor;
     int64_t cast_to;          /* ONNX TensorProto.DataType value */
 
@@ -136,7 +163,7 @@ typedef struct {
     char resize_nearest_mode[24];
     char resize_coordinate_transformation_mode[24];
 
-    char einsum_equation[32];
+    char einsum_equation[64];
 
     int64_t perm[IR_MAX_DIMS]; int perm_n;
     int64_t gather_axis;
@@ -189,6 +216,61 @@ int runtime_execute(ir_program_t *prog);
 
 /* Execute a single instruction (dispatches by opcode). */
 int execute_instruction(ir_program_t *prog, ir_instruction_t *instr);
+
+/* Element count and dtype-generic element access (float32 / int64 / int32 /
+ * bool), for kernels that must work on any dtype. Values pass through a
+ * double, so int64 values beyond 2^53 lose precision - use idata directly
+ * for exact int64 copies. */
+static inline int64_t tensor_numel(const ir_tensor_t *t) {
+    int64_t n = 1;
+    for (int i = 0; i < t->ndim; i++) n *= t->shape[i];
+    return n;
+}
+
+static inline size_t tensor_elem_size(const ir_tensor_t *t) {
+    switch (t->dtype) {
+        case DT_INT64: return 8;
+        case DT_BOOL:  return 1;
+        default:       return 4;
+    }
+}
+
+static inline double tensor_get(const ir_tensor_t *t, int64_t i) {
+    switch (t->dtype) {
+        case DT_INT64: return (double)t->idata[i];
+        case DT_INT32: return (double)((const int32_t *)t->data)[i];
+        case DT_BOOL:  return (double)((const uint8_t *)t->data)[i];
+        default:       return (double)t->data[i];
+    }
+}
+
+static inline void tensor_set(ir_tensor_t *t, int64_t i, double v) {
+    switch (t->dtype) {
+        case DT_INT64: t->idata[i] = (int64_t)v; break;
+        case DT_INT32: ((int32_t *)t->data)[i] = (int32_t)v; break;
+        case DT_BOOL:  ((uint8_t *)t->data)[i] = (v != 0.0); break;
+        default:       t->data[i] = (float)v; break;
+    }
+}
+
+/* Numpy-style broadcasting: flat index into `t` for output coordinates
+ * `out_coords` (aligned from the right, size-1 dims broadcast). */
+static inline int64_t broadcast_index(const ir_tensor_t *t, const int64_t *out_coords, int out_ndim) {
+    int64_t idx = 0, stride = 1;
+    for (int i = t->ndim - 1; i >= 0; i--) {
+        int64_t coord = out_coords[out_ndim - t->ndim + i];
+        if (t->shape[i] != 1) idx += coord * stride;
+        stride *= t->shape[i];
+    }
+    return idx;
+}
+
+static inline void unravel_index(int64_t linear, const int64_t *shape, int ndim, int64_t *coords) {
+    for (int i = ndim - 1; i >= 0; i--) {
+        coords[i] = linear % shape[i];
+        linear /= shape[i];
+    }
+}
 
 ir_opcode_t opcode_from_string(const char *s);
 const char *opcode_to_string(ir_opcode_t op);

@@ -1,5 +1,6 @@
 #include "../runtime.h"
 #include <stdio.h>
+#include <string.h>
 
 int execute_transpose(ir_program_t *prog, ir_instruction_t *instr) {
     ir_tensor_t *in = runtime_find_tensor(prog, instr->inputs[0]);
@@ -24,13 +25,14 @@ int execute_transpose(ir_program_t *prog, ir_instruction_t *instr) {
     int64_t total = 1;
     for (int i = 0; i < ndim; i++) total *= out->shape[i];
 
+    size_t es = tensor_elem_size(in);  /* dtype-generic (float32 / int64 / ...) */
     int64_t out_coords[IR_MAX_DIMS];
     for (int64_t lin = 0; lin < total; lin++) {
         int64_t rem = lin;
         for (int i = 0; i < ndim; i++) { out_coords[i] = rem / out_strides[i]; rem %= out_strides[i]; }
         int64_t in_idx = 0;
         for (int i = 0; i < ndim; i++) in_idx += out_coords[i] * in_strides[perm[i]];
-        out->data[lin] = in->data[in_idx];
+        memcpy((uint8_t *)out->data + lin * es, (const uint8_t *)in->data + in_idx * es, es);
     }
     return 0;
 }

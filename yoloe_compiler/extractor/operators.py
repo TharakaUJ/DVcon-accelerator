@@ -121,8 +121,17 @@ def _leakyrelu_attrs(a: dict) -> dict:
 
 
 def _clip_attrs(a: dict) -> dict:
-    # Newer opsets pass min/max as inputs, not attributes; handled at extraction time.
-    return {}
+    # opset >= 11 passes min/max as inputs (folded via PARAM_INPUT_POSITIONS);
+    # opset 6 has them as attributes.
+    return {k: float(a[k]) for k in ("min", "max") if k in a}
+
+
+def _hardsigmoid_attrs(a: dict) -> dict:
+    return {"alpha": float(a.get("alpha", 0.2)), "beta": float(a.get("beta", 0.5))}
+
+
+def _shape_attrs(a: dict) -> dict:
+    return {k: int(a[k]) for k in ("start", "end") if k in a}
 
 
 def _batchnorm_attrs(a: dict) -> dict:
@@ -172,7 +181,7 @@ HANDLERS: dict[str, tuple[str, Any]] = {
     "LeakyRelu":           ("LEAKYRELU", _leakyrelu_attrs),
     "Clip":                ("CLIP", _clip_attrs),
     "Silu":                ("SILU", _no_attrs),        # some exporters emit Silu directly
-    "HardSigmoid":         ("HARDSIGMOID", _no_attrs),
+    "HardSigmoid":         ("HARDSIGMOID", _hardsigmoid_attrs),
     "Concat":              ("CONCAT", _concat_attrs),
     "Split":               ("SPLIT", _split_attrs),
     "Reshape":             ("RESHAPE", _no_attrs),
@@ -193,7 +202,7 @@ HANDLERS: dict[str, tuple[str, Any]] = {
     "Slice":                ("SLICE", _no_attrs),        # opset>=10: starts/ends are inputs
     "Cast":                 ("CAST", lambda a: {"to": int(a.get("to", 1))}),
     "Constant":             ("CONSTANT", _no_attrs),      # folded into a tensor, not executed
-    "Shape":                ("SHAPE", _no_attrs),
+    "Shape":                ("SHAPE", _shape_attrs),
     "Gather":               ("GATHER", _gather_attrs),
     "Unsqueeze":            ("UNSQUEEZE", _no_attrs),
     "Squeeze":              ("SQUEEZE", _no_attrs),

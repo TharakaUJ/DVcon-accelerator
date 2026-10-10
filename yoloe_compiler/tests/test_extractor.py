@@ -9,7 +9,7 @@ from onnx import TensorProto as TP, helper
 from extractor.constant_folding import fold_candidate_tensors
 from extractor.extractor import extract
 from extractor.graph import build_dependency_graph, topological_sort, validate_topological_order
-from extractor.ir import TensorKind, contiguous_strides, dtype_size_bytes, numel
+from extractor.ir import MemoryRegion, TensorKind, contiguous_strides, dtype_size_bytes, numel
 from extractor.operators import HANDLERS, UnsupportedOperatorError, map_node
 from helpers import init, make_model
 
@@ -93,6 +93,11 @@ def test_conv_attr_defaults_and_values():
     assert attrs["stride"] == [1, 1] and attrs["padding"] == [0, 0, 0, 0]
 
 
+def test_new_op_attrs():
+    assert map_node(helper.make_node("HardSigmoid", ["x"], ["y"]))[1] == {"alpha": 0.2, "beta": 0.5}
+    assert map_node(helper.make_node("Shape", ["x"], ["y"], start=1))[1] == {"start": 1}
+
+
 def test_string_attrs_decoded():
     _, a = map_node(helper.make_node("Resize", ["x", "", "s"], ["y"], mode="nearest",
                                      coordinate_transformation_mode="asymmetric", nearest_mode="floor"))
@@ -174,3 +179,17 @@ def test_extract_constant_node_marked_constant(tmp_path):
     assert [i.op for i in r.instructions] == ["MUL"]  # Constant is not executed
     const = [t for t in r.tensors.values() if t.name == "c"][0]
     assert const.kind == TensorKind.CONSTANT
+    assert const.memory_region == MemoryRegion.WEIGHT  # data goes to weights.bin
+
+
+def test_extract_removes_dead_param_subgraph_and_resolves_shape(tmp_path):
+    # Shape -> Gather only computes Slice's `ends`, which gets folded, so both
+    # become dead; the Slice output shape is only known by running the model.
+    path = str(tmp_path / "m.onnx")
+    onnx.save(_slice_model(ends_from_shape=True), path)
+    r = extract(path)
+    assert [(i.id, i.op) for i in r.instructions] == [(0, "SLICE")]
+    assert r.instructions[0].attributes["ends"] == [4]
+    out = r.tensors[r.graph_outputs[0]]
+    assert out.shape == [1, 3, 6] and out.size_bytes == 3 * 6 * 4
+    assert not any(t.name in ("sh", "e") for t in r.tensors.values())
