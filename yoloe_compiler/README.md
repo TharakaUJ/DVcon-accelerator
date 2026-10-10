@@ -226,7 +226,7 @@ python3 verification/compare.py \
    results are only used as folded parameters (e.g. a Shape -> Gather
    chain computing Slice `ends`) are removed by `remove_dead_instructions`.
 
-## Verification status (yoloe-26n-seg, nano)
+## Verification status (yoloe-26n-seg, nano, original bring-up)
 
 445 instructions / 734 tensors extracted; memory planner cuts activation
 memory from 368.7 MB (no reuse) to ~59 MB. 448-458+/460 intermediate
@@ -238,6 +238,35 @@ test values, the full TopK -> Gather -> GatherElements -> Mod -> Einsum
 detect-head decode was confirmed correct (299/300 TopK selections exact,
 the sole difference traced to a genuine 5-significant-figure score tie at
 the top-300 cutoff, not an implementation bug).
+
+## Verification status (yoloe-26n-seg, Ultralytics 8.4.175 export, 2026-10)
+
+Re-verified against a fresh export with real COCO text prompts, both
+export variants, input `examples/bus.jpg` letterboxed to 640x640:
+
+| Export | Instructions | Activation memory | Tensors within tolerance | Final outputs |
+|---|---|---|---|---|
+| default (`output0` = `[1,116,8400]`) | 416 | 55 MB | 428 / 429 | boxes within 0.002 px (3e-6 relative), scores within 3e-6; same 49 anchors above 0.25 |
+| `end2end=True` (`output0` = `[1,300,38]`, TopK detect head) | 436 | 59 MB | 449 / 451 | all 300 class ids identical, boxes within 0.0002 px, same 9 detections above 0.25 |
+
+The tensors `compare.py` flags are the pre-head box tensors, in pixel
+units (values up to ~660), where float32 accumulation differences exceed
+the 1e-3 absolute tolerance. `yoloe_detect` on the end2end export
+(~8.5 s, single-threaded C) finds the same objects as Ultralytics'
+own onnxruntime predict, with the people, bus, truck and train boxes and
+masks. Small confidence differences come from preprocessing: stb resize in
+`image.c` vs OpenCV in Ultralytics.
+
+To reproduce the export (needs `pip install ultralytics`):
+
+```python
+import re
+from ultralytics import YOLOE
+names = re.findall(r'"([^"]+)"', open("runtime/coco_classes.h").read())
+m = YOLOE("yoloe-26n-seg.pt")
+m.set_classes(names, m.get_text_pe(names))   # real prompts, COCO order
+m.export(format="onnx", imgsz=640, simplify=True, end2end=True)
+```
 
 ## Known gaps / next steps
 
