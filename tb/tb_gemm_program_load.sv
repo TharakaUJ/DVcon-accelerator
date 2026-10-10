@@ -235,6 +235,8 @@ module tb_gemm_program_load;
     // ── Program: same 11-word GEMM ROM as the original instructions_fifo.sv ──
     localparam int NPROG = 11;
     logic [31:0] prog_words [0:NPROG-1];
+    localparam int NPROG2 = 11;
+    logic [31:0] prog2_words [0:NPROG2-1];
     initial begin
         prog_words[0]  = 32'h00000000;  // NOP
         prog_words[1]  = 32'h10000700;  // LOAD_WGT  dst=0 addr=0x00 len=7
@@ -316,6 +318,53 @@ module tb_gemm_program_load;
         check_byte(dram_idx(DST_ADDR + 0), 8'd19);
         check_byte(dram_idx(DST_ADDR + 1), 8'd22);
         check_byte(dram_idx(DST_ADDR + 8), 8'd43);
+        check_byte(dram_idx(DST_ADDR + 9), 8'd50);
+
+        // ── Run 2: same GEMM shape, operands/results moved with OP_SET_BASE ──
+        // A2 = [[2,0],[0,1]] sits 0x400 bytes past REG_SRC_ADDR and the
+        // result goes 0x800 bytes past REG_DST_ADDR; only SET_BASE (offsets in
+        // 8-byte DMA beats) points the program there. LOAD_BIAS is omitted:
+        // the bias buffer is a persistent resource that can only be loaded
+        // once per reset, and it is still READY (all-zero) from run 1.
+        //   C2 = A2 x B = [[10,12],[7,8]]
+        dram[dram_idx(64 + 'h400 + 0)] = 8'd2; dram[dram_idx(64 + 'h400 + 1)] = 8'd0;
+        dram[dram_idx(64 + 'h400 + 8)] = 8'd0; dram[dram_idx(64 + 'h400 + 9)] = 8'd1;
+        prog2_words[0]  = 32'h9100_0080;  // SET_BASE  dst=ACT  offset=0x80 beats (0x400 B)
+        prog2_words[1]  = 32'h9300_0100;  // SET_BASE  dst=OUT  offset=0x100 beats (0x800 B)
+        prog2_words[2]  = 32'h10000700;   // LOAD_WGT
+        prog2_words[3]  = 32'h20000100;   // LOAD_ACT
+        prog2_words[4]  = 32'h70000000;   // SWAP_WGT
+        prog2_words[5]  = 32'h40000000;   // MATMUL row 0
+        prog2_words[6]  = 32'h50000000;   // VECTOR row 0
+        prog2_words[7]  = 32'h40010000;   // MATMUL row 1
+        prog2_words[8]  = 32'h50010000;   // VECTOR row 1
+        prog2_words[9]  = 32'h60000100;   // STORE
+        prog2_words[10] = 32'h80000000;   // END
+        for (int i = 0; i < NPROG2; i++) begin
+            axil_write(64'h20, i);
+            axil_write(64'h24, prog2_words[i]);
+        end
+        axil_write(64'h28, NPROG2);
+        axil_write(64'h00, 32'h1);         // START
+        fork
+            begin
+                @(posedge dut.done);
+                repeat (20) @(posedge clk);
+            end
+            begin
+                repeat (20000) @(posedge clk);
+                $display("  TIMEOUT waiting for done (run 2)");
+                errors++;
+            end
+        join_any
+        disable fork;
+
+        check_byte(dram_idx(DST_ADDR + 'h800 + 0), 8'd10);
+        check_byte(dram_idx(DST_ADDR + 'h800 + 1), 8'd12);
+        check_byte(dram_idx(DST_ADDR + 'h800 + 8), 8'd7);
+        check_byte(dram_idx(DST_ADDR + 'h800 + 9), 8'd8);
+        // run 1's result is untouched
+        check_byte(dram_idx(DST_ADDR + 0), 8'd19);
         check_byte(dram_idx(DST_ADDR + 9), 8'd50);
 
         if (errors == 0)

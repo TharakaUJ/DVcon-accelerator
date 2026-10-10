@@ -46,7 +46,7 @@ module tb_control_unit;
     //-----------------------------------------------------------------
     typedef enum logic [3:0] {
         OP_NOP, OP_LOAD_WGT, OP_LOAD_ACT, OP_LOAD_BIAS, OP_MATMUL,
-        OP_VECTOR, OP_STORE, OP_SWAP_WGT, OP_END
+        OP_VECTOR, OP_STORE, OP_SWAP_WGT, OP_END, OP_SET_BASE
     } opcode_e;
 
     // NEW — mirrors control_unit's accum_ctrl_t
@@ -455,6 +455,49 @@ module tb_control_unit;
     endtask
 
     //-----------------------------------------------------------------
+    // Test 7: OP_SET_BASE offsets DMA addresses and is not reordered.
+    //   LOAD_ACT #1 is stalled behind the weight DMA; the younger SET_BASE
+    //   (always issuable on its own) must not overtake it, so LOAD_ACT #1
+    //   reads at src_addr and LOAD_ACT #2 at src_addr + offset.
+    //-----------------------------------------------------------------
+    task automatic test_set_base_ordering();
+        logic [INSTR_WIDTH-1:0] prog[];
+        logic [63:0] act_addr0, act_addr1;
+        int cyc, n_act;
+        $display("\n=== TEST 7: OP_SET_BASE ordering and address offset ===");
+        reset_dut();
+        weight_addr = 64'hA000_0000;
+        src_addr    = 64'hB000_0000;
+
+        prog = '{
+            pack_instr(OP_LOAD_WGT,  2'd0, 2'd0, 8'd0, 8'd16),
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16),            // stalled: DMA busy
+            pack_instr(OP_SET_BASE,  2'd0, 2'd1, 8'h00, 8'h01),            // act base += 0x000100 beats (0x800 B)
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd1, 8'd0, 8'd16),
+            pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
+        };
+        load_program(prog);
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
+
+        n_act = 0;
+        act_addr0 = '0;
+        act_addr1 = '0;
+        for (cyc = 0; cyc < 400 && !done; cyc++) begin
+            @(negedge clk);
+            if (dut.dma_rd_start && dut.issue_packet.opcode == OP_LOAD_ACT) begin
+                if (n_act == 0) act_addr0 = dut.dma_rd_addr;
+                else            act_addr1 = dut.dma_rd_addr;
+                n_act++;
+            end
+        end
+        check(done, "design reached done within 400 cycles");
+        check(n_act == 2 && act_addr0 == 64'hB000_0000,
+              "LOAD_ACT before SET_BASE uses the unmodified src_addr");
+        check(n_act == 2 && act_addr1 == 64'hB000_0800,
+              "LOAD_ACT after SET_BASE uses src_addr + 0x100 beats");
+    endtask
+
+    //-----------------------------------------------------------------
     // Test 3: double-buffered activations (bank0 loaded while bank1 loads),
     // and double-buffered outputs, checks per-bank independence of the
     // act_buf/out_buf scoreboards.
@@ -624,6 +667,7 @@ module tb_control_unit;
         test_soft_reset();
         test_known_issue_second_weight_load();
         test_multi_tile_reduction();
+        test_set_base_ordering();
 
         $display("\n===========================================");
         $display(" RESULT: %0d passed, %0d failed", pass_cnt, fail_cnt);
