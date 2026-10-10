@@ -142,7 +142,13 @@ module tb_gemm_program_load;
     );
 
     // ── Minimal AXI4 DRAM model (simplification #1/#2) ──────────────────
+    // The model is DRAM_BYTES long; bus addresses are taken modulo its size
+    // (low 16 bits), consistently for DUT reads/writes and for the
+    // testbench's own preload/check, so 0x0002_0000-style bases alias into it.
     logic [7:0] dram [0:DRAM_BYTES-1];
+    function automatic int dram_idx(input logic [63:0] addr);
+        return int'(addr[15:0]);
+    endfunction
 
     // Read channel: accept AR immediately, stream RLEN+1 beats back-to-back.
     logic [7:0]  rd_beats_left;
@@ -172,15 +178,18 @@ module tb_gemm_program_load;
     assign m_axi_rresp = 2'b00;
     always_comb begin
         for (int b = 0; b < 8; b++)
-            m_axi_rdata[b*8 +: 8] = dram[rd_addr_cur + b];
+            m_axi_rdata[b*8 +: 8] = dram[dram_idx(rd_addr_cur + b)];
     end
     // NOTE: m_axi_rready is driven BY the DUT (accelerator is the AXI
     // master on this interface) — no drive needed here.
 
     // Write channel: accept AW/W immediately, commit bytes, respond once.
+    // axi4_master.sv always completes AW before driving W, so wr_ptr is set
+    // on the AW handshake and advanced one 8-byte beat per W handshake (INCR).
     assign m_axi_awready = 1'b1;
     assign m_axi_wready  = 1'b1;
     logic bvalid_q;
+    logic [63:0] wr_ptr;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             bvalid_q <= 1'b0;
@@ -190,15 +199,16 @@ module tb_gemm_program_load;
             else if (m_axi_bvalid && m_axi_bready)
                 bvalid_q <= 1'b0;
 
-            if (m_axi_wvalid && m_axi_wready) begin
+            if (m_axi_awvalid && m_axi_awready)
+                wr_ptr <= m_axi_awaddr;
+            else if (m_axi_wvalid && m_axi_wready) begin
                 for (int b = 0; b < 8; b++)
                     if (m_axi_wstrb[b])
-                        dram[m_axi_awaddr_latched + b] <= m_axi_wdata[b*8 +: 8];
+                        dram[dram_idx(wr_ptr + b)] <= m_axi_wdata[b*8 +: 8];
+                wr_ptr <= wr_ptr + 8;
             end
         end
     end
-    logic [63:0] m_axi_awaddr_latched;
-    always_ff @(posedge clk) if (m_axi_awvalid && m_axi_awready) m_axi_awaddr_latched <= m_axi_awaddr;
     assign m_axi_bvalid = bvalid_q;
     assign m_axi_bresp  = 2'b00;
     assign m_axi_bid    = m_axi_awid;
@@ -259,10 +269,10 @@ module tb_gemm_program_load;
         // Pre-load DRAM: 8x8 W tile (=B zero-padded) at WEIGHT_ADDR/SRC_ADDR,
         // 8x8 A tile (rows0/1 = A, rest zero) at SRC_ADDR, 8 zero bias lanes
         // at BIAS_ADDR. Byte layout: row-major, 8 bytes/beat, INT8 elements.
-        for (int i = 0; i < 512; i++) dram[i] = 8'h00;
+        for (int i = 0; i < DRAM_BYTES; i++) dram[i] = 8'h00;   // incl. the all-zero bias at BIAS_ADDR
         // Weight tile W == B = [[5,6,0..],[7,8,0..],0...] (8x8)
-        dram[SRC_ADDR[15:0] + 0] = 8'd5; dram[SRC_ADDR[15:0] + 1] = 8'd6;
-        dram[SRC_ADDR[15:0] + 8] = 8'd7; dram[SRC_ADDR[15:0] + 9] = 8'd8;
+        dram[dram_idx(WEIGHT_ADDR + 0)] = 8'd5; dram[dram_idx(WEIGHT_ADDR + 1)] = 8'd6;
+        dram[dram_idx(WEIGHT_ADDR + 8)] = 8'd7; dram[dram_idx(WEIGHT_ADDR + 9)] = 8'd8;
         // NOTE: activation tile A is loaded from a SEPARATE region (offset
         // 64) rather than reusing SRC_ADDR/WEIGHT_ADDR's default overlap in
         // axi4_lite_slave.sv (both default to 0x00020000) — REG_SRC_ADDR is
@@ -288,15 +298,25 @@ module tb_gemm_program_load;
         // START
         axil_write(64'h00, 32'h1);
 
-        // Wait for done (poll REG_STATUS via AXI-Lite read, or just wait a
-        // generous number of cycles for this small smoke-test program).
-        repeat (2000) @(posedge clk);
+        // Wait for the program's END (control_unit's done pulse), with a timeout.
+        fork
+            begin
+                @(posedge dut.done);
+                repeat (20) @(posedge clk);   // let the final STORE's B response settle
+            end
+            begin
+                repeat (20000) @(posedge clk);
+                $display("  TIMEOUT waiting for done");
+                errors++;
+            end
+        join_any
+        disable fork;
 
         // Expected C = A x B = [[19,22],[43,50]] at DST_ADDR, row-major INT8.
-        check_byte(DST_ADDR[15:0] + 0, 8'd19);
-        check_byte(DST_ADDR[15:0] + 1, 8'd22);
-        check_byte(DST_ADDR[15:0] + 8, 8'd43);
-        check_byte(DST_ADDR[15:0] + 9, 8'd50);
+        check_byte(dram_idx(DST_ADDR + 0), 8'd19);
+        check_byte(dram_idx(DST_ADDR + 1), 8'd22);
+        check_byte(dram_idx(DST_ADDR + 8), 8'd43);
+        check_byte(dram_idx(DST_ADDR + 9), 8'd50);
 
         if (errors == 0)
             $display("TB_GEMM_PROGRAM_LOAD: PASS");
