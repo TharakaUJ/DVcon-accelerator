@@ -13,6 +13,16 @@ module tb_instruction_fifo_window;
     reg pop_en;
     reg [$clog2(WINDOW_SIZE)-1:0] pop_idx;
     wire [INSTR_WIDTH-1:0] window [0:WINDOW_SIZE-1];
+    reg restart;
+    reg wr_en;
+    reg [$clog2(INSTR_DEPTH)-1:0] wr_addr;
+    reg [INSTR_WIDTH-1:0] wr_data;
+
+    localparam [INSTR_WIDTH-1:0] END_WORD = 32'h8000_0000;
+    // distinct, recognisable word per slot (contents are opaque to the FIFO)
+    function automatic [INSTR_WIDTH-1:0] W(input integer i);
+        W = 32'h00C0_0000 | i;
+    endfunction
 
     instruction_fifo_window #(
         .INSTR_WIDTH(INSTR_WIDTH),
@@ -23,7 +33,11 @@ module tb_instruction_fifo_window;
         .rst_n(rst_n),
         .pop_en(pop_en),
         .pop_idx(pop_idx),
-        .window(window)
+        .window(window),
+        .restart(restart),
+        .wr_en(wr_en),
+        .wr_addr(wr_addr),
+        .wr_data(wr_data)
     );
 
     integer pass_cnt = 0;
@@ -85,36 +99,50 @@ module tb_instruction_fifo_window;
         rst_n = 0;
         pop_en = 0;
         pop_idx = 0;
+        restart = 0;
+        wr_en = 0;
+        wr_addr = 0;
+        wr_data = 0;
 
         tick;
         tick;
         rst_n = 1'b1;
         tick;
 
-        // NOTE: expected values below are derived from the ACTUAL rom[] program
-        // in instructions_fifo.sv (opcode-encoded, not sequential indices):
-        //   rom[0]=NOP            32'h00000000
-        //   rom[1]=LOAD_WGT       32'h10000400
-        //   rom[2]=LOAD_ACT       32'h20000400
-        //   rom[3]=LOAD_BIAS      32'h30000100
-        //   rom[4]=SWAP_WGT       32'h70000000
-        //   rom[5]=MATMUL         32'h40000000
-        //   rom[6..15]=0 (rom[6]=VECTOR/rom[7]=STORE/rom[8]=END unused by this
-        //   generic windowing test, since it only ever pops far enough to reach
-        //   rom[5] before wrapping into the trailing zero-filled entries).
-        check_window("reset window", 32'h00000000, 32'h10000400, 32'h20000400, 32'h30000100);
+        // Reset: every instruction-memory slot reads as END, so a CPU that
+        // forgets to program the memory runs nothing.
+        check_window("reset window", END_WORD, END_WORD, END_WORD, END_WORD);
+
+        // Program every slot through the write port, then restart (as
+        // start_pulse does) to refill the window from slot 0.
+        for (integer i = 0; i < INSTR_DEPTH; i = i + 1) begin
+            @(negedge clk);
+            wr_en = 1'b1; wr_addr = i; wr_data = W(i);
+        end
+        @(negedge clk);
+        wr_en = 1'b0;
+        check_window("written, before restart", END_WORD, END_WORD, END_WORD, END_WORD);
+        @(negedge clk); restart = 1'b1;
+        tick;
+        @(negedge clk); restart = 1'b0;
+        check_window("restart window", W(0), W(1), W(2), W(3));
 
         pulse_pop(0);
-        check_window("pop0", 32'h10000400, 32'h20000400, 32'h30000100, 32'h70000000);
+        check_window("pop0", W(1), W(2), W(3), W(4));
 
         pulse_pop(2);
-        check_window("pop2", 32'h10000400, 32'h20000400, 32'h70000000, 32'h40000000);
+        check_window("pop2", W(1), W(2), W(4), W(5));
 
-        // 11 more full-window pops walk fetch_ptr from 6 up through 15, wrap to
-        // 0, and land on 1 — i.e. the window ends up holding rom[13..15] and
-        // rom[0], all of which are zero-valued in this program.
+        // 11 more full-window pops fetch slots 6..15 and wrap to 0, so the
+        // window ends up holding slots 13, 14, 15 and 0.
         repeat (11) pulse_pop(0);
-        check_window("wrap", 32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000);
+        check_window("wrap", W(13), W(14), W(15), W(0));
+
+        // restart rewinds to slot 0 again
+        @(negedge clk); restart = 1'b1;
+        tick;
+        @(negedge clk); restart = 1'b0;
+        check_window("second restart", W(0), W(1), W(2), W(3));
 
         $display("\n==================================");
         $display("  INSTR FIFO TB: Passed=%0d Failed=%0d", pass_cnt, fail_cnt);
