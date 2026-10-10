@@ -301,6 +301,8 @@ module control_unit #(
     logic          issue_valid;
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] issue_index;
     logic          already_selected;
+    logic [7:0]    older_reads, older_writes;   // resources touched by older, unissued window entries
+    logic          window_hazard;
 
     // NEW — tracks whether the systolic array currently holds valid, swapped-in
     // weights, decoupled from wgt_buf_state (which only tracks the staging
@@ -311,6 +313,60 @@ module control_unit #(
     ///////////////////////////////////////////////////////////////////////////////
     // Dependency checker
     ///////////////////////////////////////////////////////////////////////////////
+    // In-window hazard check. The window issues out of order (first ready
+    // instruction wins), and the can_issue_* checks above only look at buffer
+    // states. That is not enough on its own: e.g. a STORE could drain out_buf
+    // while an older, still-waiting VECTOR has not written its row yet, or a
+    // SWAP_WGT could replace the array weights under an older MATMUL. So an
+    // instruction may only overtake older unissued instructions it shares no
+    // RAW / WAR / WAW resource with. Independent work (e.g. LOAD_ACT into the
+    // other bank, LOAD_WGT into staging during a MATMUL) still overlaps.
+    localparam int RES_WGT_STAGE = 0;
+    localparam int RES_ARRAY_WGT = 1;
+    localparam int RES_ACT0      = 2;   // RES_ACT0 + bank
+    localparam int RES_ACCUM     = 4;
+    localparam int RES_BIAS      = 5;
+    localparam int RES_OUT0      = 6;   // RES_OUT0 + bank
+    localparam int RES_N         = 8;
+
+    function automatic logic [RES_N-1:0] res_reads(input instruction_t inst);
+        res_reads = '0;
+        case (inst.opcode)
+            OP_SWAP_WGT: res_reads[RES_WGT_STAGE] = 1'b1;
+            OP_MATMUL: begin
+                res_reads[RES_ACT0 + inst.src[0]] = 1'b1;
+                res_reads[RES_ARRAY_WGT]          = 1'b1;
+            end
+            OP_VECTOR: begin
+                res_reads[RES_ACCUM] = 1'b1;
+                res_reads[RES_BIAS]  = 1'b1;
+            end
+            OP_STORE: res_reads[RES_OUT0 + inst.src[0]] = 1'b1;
+            OP_END:   res_reads = '1;   // nothing may be reordered around END
+            default: ;
+        endcase
+    endfunction
+
+    function automatic logic [RES_N-1:0] res_writes(input instruction_t inst);
+        res_writes = '0;
+        case (inst.opcode)
+            OP_LOAD_WGT:  res_writes[RES_WGT_STAGE]          = 1'b1;
+            OP_LOAD_ACT:  res_writes[RES_ACT0 + inst.dst[0]] = 1'b1;
+            OP_LOAD_BIAS: res_writes[RES_BIAS]               = 1'b1;
+            OP_SWAP_WGT: begin
+                res_writes[RES_ARRAY_WGT] = 1'b1;
+                res_writes[RES_WGT_STAGE] = 1'b1;   // staging buffer is consumed (-> EMPTY)
+            end
+            OP_MATMUL:    res_writes[RES_ACCUM]              = 1'b1;
+            OP_VECTOR: begin
+                res_writes[RES_OUT0 + inst.dst[0]] = 1'b1;
+                res_writes[RES_ACCUM]              = 1'b1;   // drains accum (-> EMPTY)
+            end
+            OP_END:       res_writes = '1;
+            default: ;
+        endcase
+    endfunction
+
     function automatic logic can_issue_load_wgt;
         return
             dma_rd_state == ENG_IDLE &&
@@ -412,6 +468,9 @@ module control_unit #(
         issue_valid = 1'b0;
         issue_index = '0;
         already_selected = 1'b0;
+        older_reads  = '0;
+        older_writes = '0;
+        window_hazard = 1'b0;
 
         fifo_pop_en  = 1'b0;
         fifo_pop_idx = '0;
@@ -478,8 +537,10 @@ module control_unit #(
             // Scan the instruction window and select the first ready instruction.
             for(i = 0; i < INSTR_WINDOW_SIZE; i = i + 1) begin
                 current_inst = decoded_window[i];
+                window_hazard = |((res_reads(current_inst) | res_writes(current_inst)) & older_writes) ||
+                                |(res_writes(current_inst) & older_reads);
 
-                if(!already_selected) begin
+                if(!already_selected && !window_hazard) begin
                     unique case(current_inst.opcode)
 
                         OP_NOP: begin
@@ -611,6 +672,11 @@ module control_unit #(
                         end
 
                     endcase
+                end
+
+                if (!already_selected) begin
+                    older_reads  = older_reads  | res_reads(current_inst);
+                    older_writes = older_writes | res_writes(current_inst);
                 end
             end
         end
