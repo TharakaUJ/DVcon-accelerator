@@ -30,6 +30,7 @@ int execute_split(ir_program_t *prog, ir_instruction_t *instr) {
         for (int i = 0; i < instr->num_outputs; i++) sizes[i] = even;
     }
 
+    size_t row_bytes = tensor_elem_size(in) * inner;  /* dtype-generic (float32 / int64 / ...) */
     int64_t axis_offset = 0;
     for (int o = 0; o < instr->num_outputs; o++) {
         ir_tensor_t *out = runtime_find_tensor(prog, instr->outputs[o]);
@@ -38,9 +39,9 @@ int execute_split(ir_program_t *prog, ir_instruction_t *instr) {
 
         for (int64_t oo = 0; oo < outer; oo++) {
             for (int64_t a = 0; a < out_axis_dim; a++) {
-                const float *src = in->data + (oo * in->shape[axis] + (axis_offset + a)) * inner;
-                float *dst = out->data + (oo * out_axis_dim + a) * inner;
-                memcpy(dst, src, sizeof(float) * inner);
+                const uint8_t *src = (const uint8_t *)in->data + (oo * in->shape[axis] + (axis_offset + a)) * row_bytes;
+                uint8_t *dst = (uint8_t *)out->data + (oo * out_axis_dim + a) * row_bytes;
+                memcpy(dst, src, row_bytes);
             }
         }
         axis_offset += out_axis_dim;

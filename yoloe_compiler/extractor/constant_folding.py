@@ -24,13 +24,26 @@ import onnx
 import onnxruntime as ort
 
 
+def _elem_types(graph: onnx.GraphProto) -> dict[str, int]:
+    """tensor name -> ONNX elem_type, from shape-inferred value_info and initializers."""
+    types = {init.name: init.data_type for init in graph.initializer}
+    for vi in list(graph.input) + list(graph.output) + list(graph.value_info):
+        if vi.type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED:
+            types[vi.name] = vi.type.tensor_type.elem_type
+    return types
+
+
 def _all_outputs_model(model: onnx.ModelProto, names: set[str]) -> onnx.ModelProto:
+    # Outputs need a real elem_type: onnxruntime rejects UNDEFINED graph
+    # outputs ("Invalid tensor data type 0"), same as in dump_reference.py.
     m = onnx.ModelProto()
     m.CopyFrom(model)
+    types = _elem_types(m.graph)
     existing = {o.name for o in m.graph.output}
     for name in names:
         if name and name not in existing:
-            m.graph.output.append(onnx.helper.make_tensor_value_info(name, onnx.TensorProto.UNDEFINED, None))
+            elem_type = types.get(name, onnx.TensorProto.INT64)  # params are int64 (or float scales)
+            m.graph.output.append(onnx.helper.make_tensor_value_info(name, elem_type, None))
             existing.add(name)
     return m
 
@@ -43,6 +56,23 @@ def _run_once(model: onnx.ModelProto, input_name: str, input_shape: list[int], n
     out_names = [o.name for o in sess.get_outputs()]
     results = sess.run(out_names, {input_name: x})
     return dict(zip(out_names, results))
+
+
+def resolve_shapes(
+    model: onnx.ModelProto,
+    input_name: str,
+    input_shape: list[int],
+    names: set[str],
+) -> dict[str, list[int]]:
+    """Actual shapes of `names` from one onnxruntime run, for tensors whose
+    shape ONNX shape inference could not resolve (e.g. a Slice whose `ends`
+    comes from a Shape -> Gather chain). With a static input shape and only
+    supported ops, every shape is input-independent."""
+    names = {n for n in names if n}
+    if not names:
+        return {}
+    run = _run_once(model, input_name, input_shape, names, seed=1)
+    return {name: list(run[name].shape) for name in names if name in run}
 
 
 def fold_candidate_tensors(

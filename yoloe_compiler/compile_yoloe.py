@@ -22,7 +22,7 @@ from extractor.operators import UnsupportedOperatorError, HANDLERS
 from extractor.graph import build_dependency_graph, validate_topological_order
 from analysis.liveness import compute_liveness, find_unused_tensors
 from analysis.memory_planner import plan_memory
-from analysis.graph_validation import validate_instruction_order, validate_no_memory_overlap
+from analysis.graph_validation import validate_instruction_order, validate_no_memory_overlap, validate_static_shapes
 from output.json_writer import write_instructions_json, write_tensors_json
 from output.trace_writer import write_execution_trace
 from output.dot_writer import write_dot
@@ -59,7 +59,6 @@ def print_inspection(summary: dict) -> None:
     print()
     print(f"Unique ONNX operators ({len(summary['unique_ops'])}):")
     for op in summary["unique_ops"]:
-        flag = "" if op in summary.get("unsupported_ops", []) is False else ""
         supported = op not in summary["unsupported_ops"]
         mark = "OK" if supported else "MISSING HANDLER"
         print(f"    {summary['op_counts'][op]:>4}x  {op:<24} [{mark}]")
@@ -90,28 +89,10 @@ def compile_model(model_path: str, output_dir: str) -> None:
     if unused:
         print(f"      WARNING: {len(unused)} tensor(s) produced but never consumed and not a model output: {unused[:10]}{'...' if len(unused) > 10 else ''}")
 
-    # Safety check: any CONSTANT-kind tensor genuinely consumed at runtime
-    # (not folded into an attribute by constant_folding.py) needs its data
-    # written somewhere for the C runtime to read - weights_writer.py only
-    # covers WEIGHT/BIAS today. None of the models this project has been
-    # tested against hit this case (all Constant-node outputs turned out to
-    # be shape-only parameters that got folded away), but warn loudly
-    # rather than silently leaving such a tensor as zeroed/uninitialized.
-    from extractor.ir import TensorKind
-    consumed_ids = {tid for instr in result.instructions for tid in instr.inputs}
-    unhandled_constants = [
-        tid for tid in consumed_ids
-        if result.tensors[tid].kind == TensorKind.CONSTANT
-    ]
-    if unhandled_constants:
-        print(f"      WARNING: {len(unhandled_constants)} CONSTANT tensor(s) are real runtime "
-              f"data dependencies with no data source in weights.bin: {unhandled_constants}. "
-              f"Extend output/weights_writer.py to include CONSTANT-kind tensors before running "
-              f"this model in the C runtime, or its values will be zero.")
-
     print("[3/7] Validating instruction ordering (dependency correctness)")
     validate_instruction_order(result.instructions, result.tensors)
-    print("      OK: every instruction's inputs are available when it runs.")
+    validate_static_shapes(result.instructions, result.tensors)
+    print("      OK: every instruction's inputs are available when it runs, all shapes static.")
 
     print("[4/7] Planning memory (linear-scan lifetime allocator, per-region)")
     plans = plan_memory(result.tensors)

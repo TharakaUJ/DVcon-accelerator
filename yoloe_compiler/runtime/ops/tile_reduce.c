@@ -1,5 +1,7 @@
 #include "../runtime.h"
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 int execute_tile(ir_program_t *prog, ir_instruction_t *instr) {
     ir_tensor_t *in = runtime_find_tensor(prog, instr->inputs[0]);
@@ -29,11 +31,12 @@ int execute_tile(ir_program_t *prog, ir_instruction_t *instr) {
     return 0;
 }
 
-/* ReduceMax over the axes given in instr->reduce_axes. Only the pattern
- * actually used by YOLOE's detect head (reduce over the last axis, i.e.
- * per-anchor max class score) is exercised, but this implementation
- * supports an arbitrary axis subset. */
-int execute_reducemax(ir_program_t *prog, ir_instruction_t *instr) {
+typedef enum { REDUCE_MAX, REDUCE_SUM, REDUCE_MEAN } reduce_kind_t;
+
+/* ReduceMax/Sum/Mean over the axes given in instr->reduce_axes (all axes
+ * when none are given, per ONNX). YOLOE's detect head only reduces over the
+ * last axis (per-anchor max class score), but any axis subset works. */
+static int execute_reduce(ir_program_t *prog, ir_instruction_t *instr, reduce_kind_t kind) {
     ir_tensor_t *in = runtime_find_tensor(prog, instr->inputs[0]);
     ir_tensor_t *out = runtime_find_tensor(prog, instr->outputs[0]);
     if (!in || !out) return -1;
@@ -45,70 +48,38 @@ int execute_reducemax(ir_program_t *prog, ir_instruction_t *instr) {
         if (ax < 0) ax += ndim;
         reduce_mask[ax] = 1;
     }
-
-    int64_t in_strides[IR_MAX_DIMS];
-    int64_t s = 1;
-    for (int i = ndim - 1; i >= 0; i--) { in_strides[i] = s; s *= in->shape[i]; }
-
-    /* out has the reduced axes either dropped (keepdims=0) or size-1
-     * (keepdims=1); tensors.json (from ONNX shape inference) already tells
-     * us the correct out->shape/out->ndim either way, so we just need to
-     * map an output linear index back to the correct set of input coords
-     * (with reduced axes ranging over their full extent). */
-    int out_ndim = out->ndim;
-    int64_t out_strides[IR_MAX_DIMS];
-    s = 1;
-    for (int i = out_ndim - 1; i >= 0; i--) { out_strides[i] = s; s *= out->shape[i]; }
-
-    int64_t out_total = 1;
-    for (int i = 0; i < out_ndim; i++) out_total *= out->shape[i];
-
-    /* Build mapping from output-dim index -> input-dim index (skipping
-     * reduced dims when keepdims==0). */
-    int out_to_in_dim[IR_MAX_DIMS];
-    if (instr->keepdims) {
-        for (int i = 0; i < ndim; i++) out_to_in_dim[i] = i;
-    } else {
-        int o = 0;
-        for (int i = 0; i < ndim; i++) if (!reduce_mask[i]) out_to_in_dim[o++] = i;
+    if (instr->reduce_n == 0) {
+        for (int i = 0; i < ndim; i++) reduce_mask[i] = 1;
     }
 
-    int64_t out_coords[IR_MAX_DIMS];
-    for (int64_t lin = 0; lin < out_total; lin++) {
-        int64_t rem = lin;
-        for (int i = 0; i < out_ndim; i++) { out_coords[i] = rem / out_strides[i]; rem %= out_strides[i]; }
+    /* Walk the input once, accumulating each element into the output slot
+     * whose coordinates match on the kept axes. Output index is computed
+     * over the kept axes only, which is the same flat order for keepdims=0
+     * (dims dropped) and keepdims=1 (dims of size 1). */
+    int64_t out_total = tensor_numel(out);
+    int64_t red_count = 1;
+    for (int i = 0; i < ndim; i++) if (reduce_mask[i]) red_count *= in->shape[i];
 
-        int64_t base_coords[IR_MAX_DIMS] = {0};
-        for (int i = 0; i < out_ndim; i++) {
-            int in_dim = out_to_in_dim[i];
-            base_coords[in_dim] = instr->keepdims && reduce_mask[in_dim] ? 0 : out_coords[i];
-        }
+    double *acc = (double *)malloc(sizeof(double) * (out_total ? out_total : 1));
+    if (!acc) return -1;
+    for (int64_t o = 0; o < out_total; o++) acc[o] = (kind == REDUCE_MAX) ? -INFINITY : 0.0;
 
-        /* iterate over the reduced axes' full extent, tracking the max */
-        float best = -3.402823e38f;
-        int64_t idx_coords[IR_MAX_DIMS];
-        for (int i = 0; i < ndim; i++) idx_coords[i] = base_coords[i];
-
-        /* simple recursive-free enumeration over reduced dims via odometer */
-        int red_dims[IR_MAX_DIMS], n_red = 0;
-        for (int i = 0; i < ndim; i++) if (reduce_mask[i]) red_dims[n_red++] = i;
-
-        int64_t red_total = 1;
-        for (int i = 0; i < n_red; i++) red_total *= in->shape[red_dims[i]];
-
-        for (int64_t r = 0; r < red_total; r++) {
-            int64_t rr = r;
-            for (int i = 0; i < n_red; i++) {
-                int64_t dim_size = in->shape[red_dims[i]];
-                idx_coords[red_dims[i]] = rr % dim_size;
-                rr /= dim_size;
-            }
-            int64_t in_idx = 0;
-            for (int i = 0; i < ndim; i++) in_idx += idx_coords[i] * in_strides[i];
-            float v = in->data[in_idx];
-            if (v > best) best = v;
-        }
-        out->data[lin] = best;
+    int64_t in_total = tensor_numel(in);
+    int64_t coords[IR_MAX_DIMS];
+    for (int64_t lin = 0; lin < in_total; lin++) {
+        unravel_index(lin, in->shape, ndim, coords);
+        int64_t o = 0;
+        for (int i = 0; i < ndim; i++) if (!reduce_mask[i]) o = o * in->shape[i] + coords[i];
+        double v = in->data[lin];
+        if (kind == REDUCE_MAX) { if (v > acc[o]) acc[o] = v; }
+        else acc[o] += v;
     }
+    for (int64_t o = 0; o < out_total; o++)
+        out->data[o] = (float)(kind == REDUCE_MEAN ? acc[o] / red_count : acc[o]);
+    free(acc);
     return 0;
 }
+
+int execute_reducemax(ir_program_t *prog, ir_instruction_t *instr) { return execute_reduce(prog, instr, REDUCE_MAX); }
+int execute_reducesum(ir_program_t *prog, ir_instruction_t *instr) { return execute_reduce(prog, instr, REDUCE_SUM); }
+int execute_reducemean(ir_program_t *prog, ir_instruction_t *instr) { return execute_reduce(prog, instr, REDUCE_MEAN); }

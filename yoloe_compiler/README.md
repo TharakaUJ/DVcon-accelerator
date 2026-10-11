@@ -19,7 +19,8 @@ ONNX  ->  extraction (Python)  ->  instructions.json + tensors.json
 
 ```
 extractor/       ONNX -> IR. onnx_loader, graph (dependency/topo-sort),
-                  operators (op_type -> IR primitive map, 26 ops covered),
+                  operators (op_type -> IR primitive map, 49 ONNX ops;
+                  all but NonMaxSuppression have a C kernel),
                   tensors (shape/dtype/layout/kind), instructions
                   (+ constant_folding.py: resolves shape-only "parameter"
                   tensors like Slice starts/ends into attributes, with an
@@ -63,11 +64,44 @@ compile_yoloe.py       Top-level CLI: ONNX -> build/{instructions,tensors}.json
                         `--inspect-only` prints the model summary (op list,
                         shapes, dynamic-shape check) without compiling.
 
-examples/               tiny.onnx (synthetic 7-node test graph) +
-                        make_tiny_model.py to regenerate it. Bus.jpg is a
-                        real photo (from ultralytics' public assets) used
-                        for realistic-input verification runs.
+tests/                  pytest suite (see "Running the tests" below) +
+                        make_tiny_model.py, which generates the synthetic
+                        7-node tiny.onnx test graph.
+
+examples/               local-only (gitignored): tiny.onnx and bus.jpg (a
+                        real photo from ultralytics' public assets) for
+                        manual runs. Regenerate tiny.onnx with
+                        `python3 tests/make_tiny_model.py examples/tiny.onnx`.
 ```
+
+## Setup
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt     # numpy, onnx, onnxruntime, pytest
+make -C runtime                     # gcc + make; builds yoloe_runtime and yoloe_detect
+```
+
+## Running the tests
+
+```bash
+cd yoloe_compiler
+pytest                  # whole suite (~2 s); builds the C runtime automatically
+pytest -k runtime_ops   # just the per-operator C-vs-ONNXRuntime checks
+```
+
+| File | What it covers |
+|---|---|
+| `tests/test_extractor.py` | IR helpers, dependency graph / topological order, op attribute mapping, constant folding (incl. rejecting data-dependent values), `extract()` |
+| `tests/test_analysis.py` | liveness, memory planner (reuse, alignment, no same-instruction aliasing), schedule, memory-overlap and static-shape validators |
+| `tests/test_runtime_ops.py` | ~85 small ONNX graphs, one per op/attribute variant, compiled and run through `yoloe_runtime`, every tensor compared against onnxruntime; plus the tiny model and a deep conv chain that stresses memory reuse |
+| `tests/test_cli.py` | the README command-line flows: `compile_yoloe.py` (incl. `--inspect-only` and unsupported ops), `dump_reference.py` → `yoloe_runtime` → `compare.py`, and `yoloe_detect` on a synthetic detection model |
+
+To add a case, add an entry to `CASES` in `tests/test_runtime_ops.py`
+(nodes, input shape, output, initializers); the harness does the rest.
+
+No real YOLOE model is in the repo, so the full-model verification below
+has to be run by hand with your own `.onnx`.
 
 ## Quick start: pure-C object detection (image in, detections out)
 
@@ -146,7 +180,9 @@ python3 verification/compare.py \
    written is a use-after-free-style correctness bug (it caused a real
    segfault during development, traced to corrupted int64 indices).
    `analysis/memory_planner.py`'s `release_expired` only frees tensors
-   whose `discard_after < current_instruction`, not `<=`.
+   whose `discard_after < current_instruction`, not `<=`, and
+   `analysis/graph_validation.py`'s overlap check treats lifetimes as
+   inclusive so it actually catches a violation of this rule.
 
 3. **Elementwise binops (Add/Sub/Mul/Div) must dispatch on tensor dtype.**
    YOLOE's detect head does real int64 arithmetic (e.g. dividing flattened
@@ -177,7 +213,20 @@ python3 verification/compare.py \
    `verification/dump_reference.py` also writes a `weights.bin` but only as
    a side effect of generating ground-truth data for `compare.py`.
 
-## Verification status (yoloe-26n-seg, nano)
+7. **Constant folding must give onnxruntime real output dtypes.** Recent
+   onnxruntime versions reject graph outputs declared as UNDEFINED
+   ("Invalid tensor data type 0"), which broke compiling any model with a
+   Slice/TopK/Tile/... parameter. `constant_folding.py` now takes each
+   candidate's dtype from shape inference, like `dump_reference.py` does.
+
+8. **Constant-node outputs are data, not just parameters.** They live in
+   the WEIGHT region and are written to weights.bin with the initializers
+   (`weights_writer.py` checks each tensor's byte count, since the C loader
+   reads them back in the same order by `size_bytes`). Instructions whose
+   results are only used as folded parameters (e.g. a Shape -> Gather
+   chain computing Slice `ends`) are removed by `remove_dead_instructions`.
+
+## Verification status (yoloe-26n-seg, nano, original bring-up)
 
 445 instructions / 734 tensors extracted; memory planner cuts activation
 memory from 368.7 MB (no reuse) to ~59 MB. 448-458+/460 intermediate
@@ -190,15 +239,58 @@ detect-head decode was confirmed correct (299/300 TopK selections exact,
 the sole difference traced to a genuine 5-significant-figure score tie at
 the top-300 cutoff, not an implementation bug).
 
+## Verification status (yoloe-26n-seg, Ultralytics 8.4.175 export, 2026-10)
+
+Re-verified against a fresh export with real COCO text prompts, both
+export variants, input `examples/bus.jpg` letterboxed to 640x640:
+
+| Export | Instructions | Activation memory | Tensors within tolerance | Final outputs |
+|---|---|---|---|---|
+| default (`output0` = `[1,116,8400]`) | 416 | 55 MB | 428 / 429 | boxes within 0.002 px (3e-6 relative), scores within 3e-6; same 49 anchors above 0.25 |
+| `end2end=True` (`output0` = `[1,300,38]`, TopK detect head) | 436 | 59 MB | 449 / 451 | all 300 class ids identical, boxes within 0.0002 px, same 9 detections above 0.25 |
+
+The tensors `compare.py` flags are the pre-head box tensors, in pixel
+units (values up to ~660), where float32 accumulation differences exceed
+the 1e-3 absolute tolerance. `yoloe_detect` on the end2end export
+(~8.5 s, single-threaded C) finds the same objects as Ultralytics'
+own onnxruntime predict, with the people, bus, truck and train boxes and
+masks. Small confidence differences come from preprocessing: stb resize in
+`image.c` vs OpenCV in Ultralytics.
+
+To reproduce the export (needs `pip install ultralytics`):
+
+```python
+import re
+from ultralytics import YOLOE
+names = re.findall(r'"([^"]+)"', open("runtime/coco_classes.h").read())
+m = YOLOE("yoloe-26n-seg.pt")
+m.set_classes(names, m.get_text_pe(names))   # real prompts, COCO order
+m.export(format="onnx", imgsz=640, simplify=True, end2end=True)
+```
+
 ## Known gaps / next steps
 
 - C kernels are unoptimized nested loops by design (spec: correctness
   before speed). Tiling/SIMD/threading/quantization are all future work.
-- Resize only implements nearest-neighbor (sufficient for this model's
-  Upsample-equivalent nodes); bilinear is unimplemented.
-- Einsum only supports the exact equation YOLOE uses
-  (`bchw,bkc->bkhw`) - fails loudly rather than attempting a generic
-  einsum evaluator, since no other equation appears in this model.
+- NonMaxSuppression has an IR handler but no C kernel (compile succeeds,
+  `yoloe_runtime` fails at that instruction).
+- Remaining kernel limitations (each fails loudly unless noted):
+  - Resize: `nearest` and `linear` on 4D NCHW (H/W only); `cubic`,
+    antialias, `extrapolation_value` and `keep_aspect_ratio_policy` are not
+    implemented (the last three are silently ignored).
+  - MatMul: 1-D operands are not implemented.
+  - Unary activations (Relu, Sigmoid, Clip, Exp, ...) are float32 only;
+    Add/Sub/Mul/Div need both inputs float32 or both int64, and int64 Div
+    truncates toward zero.
+  - Einsum: no ellipsis (`...`). Equations other than YOLOE's
+    `bchw,bkc->bkhw` use a slow generic loop.
+  - ConvTranspose ignores `dilations`; pooling ignores `ceil_mode` beyond
+    the output shape and `count_include_pad` (untested).
+- Tensor shapes that ONNX shape inference cannot resolve (e.g. computed via
+  Shape -> Gather -> Slice) are taken from one onnxruntime run at compile
+  time, which assumes the model's shapes don't depend on pixel data
+  (true for every supported op). A tensor still unresolved after that fails
+  compilation (`validate_static_shapes`).
 - No FPGA backend yet - that's the explicit next phase once this reference
   path is fully trusted (see spec section 22: the instruction stream itself
   should not need to change when the C backend is swapped for an FPGA one).

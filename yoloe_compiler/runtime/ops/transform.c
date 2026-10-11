@@ -22,9 +22,23 @@ int execute_cast(ir_program_t *prog, ir_instruction_t *instr) {
     } else if (in->dtype == out->dtype) {
         memcpy(out->data, in->data, in->size_bytes);
     } else {
-        fprintf(stderr, "CAST: unsupported dtype conversion (%d -> %d)\n", in->dtype, out->dtype);
-        return -1;
+        /* any other float32 / int64 / int32 / bool pair (truncating, like ONNX) */
+        for (int64_t i = 0; i < n; i++) tensor_set(out, i, tensor_get(in, i));
     }
+    return 0;
+}
+
+/* Shape: the input's static dims (optionally [start:end], opset 15) as int64. */
+int execute_shape(ir_program_t *prog, ir_instruction_t *instr) {
+    ir_tensor_t *in = runtime_find_tensor(prog, instr->inputs[0]);
+    ir_tensor_t *out = runtime_find_tensor(prog, instr->outputs[0]);
+    if (!in || !out) return -1;
+    int64_t start = instr->shape_start, end = instr->has_shape_end ? instr->shape_end : in->ndim;
+    if (start < 0) start += in->ndim;
+    if (end < 0) end += in->ndim;
+    if (start < 0) start = 0;
+    if (end > in->ndim) end = in->ndim;
+    for (int64_t i = start; i < end; i++) out->idata[i - start] = in->shape[i];
     return 0;
 }
 

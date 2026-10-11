@@ -8,8 +8,8 @@
  *                --image photo.jpg --output out.png [--conf 0.25]
  *
  * build/ must contain instructions.json + tensors.json (from
- * compile_yoloe.py). weights.bin is the raw native-dtype tensor dump from
- * verification/dump_reference.py (or an equivalent writer - see README).
+ * compile_yoloe.py). weights.bin is the raw native-dtype tensor dump
+ * written by compile_yoloe.py (output/weights_writer.py).
  */
 #include "runtime.h"
 #include "image.h"
@@ -151,8 +151,10 @@ int main(int argc, char **argv) {
             int py1 = (int)(d->y1 * proto_h / canvas_size);
             int px2 = (int)(d->x2 * proto_w / canvas_size) + 1;
             int py2 = (int)(d->y2 * proto_h / canvas_size) + 1;
-            if (px1 < 0) px1 = 0; if (py1 < 0) py1 = 0;
-            if (px2 > proto_w) px2 = proto_w; if (py2 > proto_h) py2 = proto_h;
+            if (px1 < 0) px1 = 0;
+            if (py1 < 0) py1 = 0;
+            if (px2 > proto_w) px2 = proto_w;
+            if (py2 > proto_h) py2 = proto_h;
             int pbw = px2 - px1, pbh = py2 - py1;
 
             if (pbw > 0 && pbh > 0) {

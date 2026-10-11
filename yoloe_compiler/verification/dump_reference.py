@@ -2,8 +2,9 @@
 """
 Runs the original ONNX model (via onnxruntime) and dumps:
   - every intermediate tensor as reference/<tensor_name>.npy   (spec section 13)
-  - weights.bin: raw float32 concatenation of every WEIGHT/BIAS tensor,
-    ID-sorted exactly like tensors.json (so runtime/main.c can mmap them in)
+  - weights.bin: raw native-dtype concatenation of every WEIGHT-region tensor,
+    ID-sorted exactly like tensors.json (identical to the one compile_yoloe.py
+    writes; kept so this script is self-contained)
   - input.bin: raw float32 dump of the model input, in the same order
   - a name_map.json so the C-side tensor ids can be matched back to .npy files
 
@@ -95,15 +96,15 @@ def dump_reference(model_path: str, build_dir: str, input_path: str | None, outp
             json.dump(id_to_name, f, indent=2)
 
         # 4. weights.bin - raw bytes in each tensor's native dtype, ID-sorted
-        #    WEIGHT/BIAS tensors, matching main.c's load order (which
+        #    WEIGHT-region tensors, matching main.c's load order (which
         #    iterates tensors in the same id-sorted order). Do NOT force
         #    everything to float32 - some YOLOE initializers (e.g. Split's
         #    split-size tensor) are int64.
         weight_bytes = bytearray()
         for tid in sorted(id_to_name.keys()):
             t = next(t for t in tdata["tensors"] if t["id"] == tid)
-            if t["kind"] in ("WEIGHT", "BIAS"):
-                arr = loaded.get_initializer_array(t["name"])  # native dtype, no cast
+            if t["memory_region"] == "WEIGHT":
+                arr = loaded.get_constant_array(t["name"])  # native dtype, no cast
                 weight_bytes += arr.tobytes()
         with open(os.path.join(output_dir, "weights.bin"), "wb") as f:
             f.write(weight_bytes)

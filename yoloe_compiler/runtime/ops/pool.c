@@ -43,3 +43,18 @@ static int execute_pool(ir_program_t *prog, ir_instruction_t *instr, int is_max)
 
 int execute_maxpool(ir_program_t *prog, ir_instruction_t *instr) { return execute_pool(prog, instr, 1); }
 int execute_avgpool(ir_program_t *prog, ir_instruction_t *instr) { return execute_pool(prog, instr, 0); }
+
+/* GlobalAveragePool: [N, C, H, W] -> [N, C, 1, 1] */
+int execute_globalavgpool(ir_program_t *prog, ir_instruction_t *instr) {
+    ir_tensor_t *in = runtime_find_tensor(prog, instr->inputs[0]);
+    ir_tensor_t *out = runtime_find_tensor(prog, instr->outputs[0]);
+    if (!in || !out) { fprintf(stderr, "GLOBALAVGPOOL: missing tensor\n"); return -1; }
+    int64_t nc = in->shape[0] * in->shape[1];
+    int64_t plane = tensor_numel(in) / nc;
+    for (int64_t i = 0; i < nc; i++) {
+        double acc = 0.0;
+        for (int64_t p = 0; p < plane; p++) acc += in->data[i * plane + p];
+        out->data[i] = (float)(acc / plane);
+    }
+    return 0;
+}

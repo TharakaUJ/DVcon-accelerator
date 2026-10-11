@@ -1,0 +1,5 @@
+# Tested with onnx 1.23.2, onnxruntime 1.31.0, numpy 2.4.6, pytest 9.x (Python 3.11)
+numpy
+onnx
+onnxruntime
+pytest

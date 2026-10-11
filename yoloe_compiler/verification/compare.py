@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compares the C runtime's per-tensor .bin dumps (raw float32, from
+Compares the C runtime's per-tensor .bin dumps (raw native dtype, from
 runtime/main.c --dump-dir) against the ONNX reference .npy dumps (from
 verification/dump_reference.py), tensor by tensor, in IR instruction order.
 
@@ -23,7 +23,7 @@ def load_c_tensor(dump_dir: str, tensor_id: str, shape: list[int], dtype: str = 
     path = os.path.join(dump_dir, f"{tensor_id}.bin")
     if not os.path.exists(path):
         return None
-    np_dtype = np.int64 if dtype == "int64" else np.float32
+    np_dtype = {"int64": np.int64, "int32": np.int32, "bool": np.bool_}.get(dtype, np.float32)
     arr = np.fromfile(path, dtype=np_dtype)
     return arr.reshape(shape)
 

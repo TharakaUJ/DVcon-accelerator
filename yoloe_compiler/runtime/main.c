@@ -8,10 +8,10 @@
  *                 --input reference/input.bin \
  *                 --dump-dir out/
  *
- * weights.bin / input.bin are raw float32 dumps produced by
- * verification/dump_reference.py, in the same order as tensors.json lists
- * WEIGHT/BIAS and INPUT tensors respectively (id-sorted, matching
- * json_writer.py's sort order).
+ * weights.bin / input.bin are raw native-dtype dumps (weights.bin from
+ * compile_yoloe.py or verification/dump_reference.py, input.bin from
+ * dump_reference.py), in the same order as tensors.json lists WEIGHT/BIAS
+ * and INPUT tensors respectively (id-sorted, matching json_writer.py).
  */
 #include "runtime.h"
 #include <stdio.h>

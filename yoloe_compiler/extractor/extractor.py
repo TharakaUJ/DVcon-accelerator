@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from .onnx_loader import LoadedModel
 from .graph import build_dependency_graph, validate_topological_order, DependencyGraph
 from .tensors import build_tensor_table
-from .instructions import build_instructions, collect_param_candidate_names
-from .constant_folding import fold_candidate_tensors
-from .ir import Instruction, Tensor, TensorKind
+from .instructions import build_instructions, collect_param_candidate_names, remove_dead_instructions
+from .constant_folding import fold_candidate_tensors, resolve_shapes
+from .ir import Instruction, MemoryRegion, Tensor, TensorKind, contiguous_strides, dtype_size_bytes, numel
 from .operators import UnsupportedOperatorError
 
 
@@ -61,6 +61,25 @@ def _assign_tensor_ids(loaded: LoadedModel, dg: DependencyGraph) -> dict[str, st
     return tensor_id_of
 
 
+def _resolve_dynamic_shapes(loaded: LoadedModel, dg: DependencyGraph, tensors: dict[str, Tensor]) -> None:
+    """Fill in shapes that ONNX shape inference left unresolved by running the
+    model once in onnxruntime (see constant_folding.resolve_shapes)."""
+    dynamic = [t for t in tensors.values() if any(not isinstance(d, int) or d < 0 for d in t.shape)]
+    if not dynamic:
+        return
+    input_vi = [i for i in loaded.graph.input if i.name not in dg.initializers][0]
+    in_shape, _ = loaded.get_shape_dtype(input_vi.name)
+    in_shape = [d if isinstance(d, int) and d > 0 else 1 for d in in_shape]
+    shapes = resolve_shapes(loaded.model, input_vi.name, in_shape, {t.name for t in dynamic})
+    for t in dynamic:
+        if t.name not in shapes:
+            continue  # left dynamic; validate_static_shapes reports it if it is used
+        t.shape = shapes[t.name]
+        t.size_bytes = numel(t.shape) * dtype_size_bytes(t.dtype)
+        t.strides = contiguous_strides(t.shape)
+        t.layout = "NCHW" if len(t.shape) == 4 else "LINEAR"
+
+
 def extract(model_path: str, strict_order: bool = True) -> ExtractionResult:
     loaded = LoadedModel(model_path)
     dg = build_dependency_graph(loaded.graph)
@@ -96,16 +115,28 @@ def extract(model_path: str, strict_order: bool = True) -> ExtractionResult:
     except UnsupportedOperatorError:
         raise
 
+    graph_input_ids = [tensor_id_of[i.name] for i in loaded.graph.input if i.name not in dg.initializers]
+    graph_output_ids = [tensor_id_of[o.name] for o in loaded.graph.output]
+    instructions = remove_dead_instructions(instructions, set(graph_output_ids))
+
     tensors = build_tensor_table(loaded, dg, tensor_id_of)
 
-    # Mark folded Constant outputs explicitly as CONSTANT kind.
+    # Mark folded Constant outputs explicitly as CONSTANT kind. Their data is
+    # known at compile time, so they live in the WEIGHT region and are
+    # written to weights.bin alongside the initializers.
     for name in const_node_outputs:
         tid = tensor_id_of.get(name)
         if tid in tensors:
             tensors[tid].kind = TensorKind.CONSTANT
+            tensors[tid].memory_region = MemoryRegion.WEIGHT
 
-    graph_input_ids = [tensor_id_of[i.name] for i in loaded.graph.input if i.name not in dg.initializers]
-    graph_output_ids = [tensor_id_of[o.name] for o in loaded.graph.output]
+    # Activations of removed (dead) instructions have no producer any more.
+    referenced = {tid for instr in instructions for tid in instr.inputs + instr.outputs}
+    for tid in [t.id for t in tensors.values()
+                if t.kind == TensorKind.ACTIVATION and t.id not in referenced]:
+        del tensors[tid]
+
+    _resolve_dynamic_shapes(loaded, dg, tensors)
 
     return ExtractionResult(
         instructions=instructions,
