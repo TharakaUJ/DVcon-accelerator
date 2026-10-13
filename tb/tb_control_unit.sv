@@ -46,7 +46,7 @@ module tb_control_unit;
     //-----------------------------------------------------------------
     typedef enum logic [3:0] {
         OP_NOP, OP_LOAD_WGT, OP_LOAD_ACT, OP_LOAD_BIAS, OP_MATMUL,
-        OP_VECTOR, OP_STORE, OP_SWAP_WGT, OP_END
+        OP_VECTOR, OP_STORE, OP_SWAP_WGT, OP_END, OP_SET_BASE
     } opcode_e;
 
     // NEW — mirrors control_unit's accum_ctrl_t
@@ -400,42 +400,101 @@ module tb_control_unit;
     endtask
 
     //-----------------------------------------------------------------
-    // Test 2: out-of-order issue / hazard check.
-    //   Window is loaded MATMUL-first, but MATMUL can't issue until its
-    //   weight+act deps are ready, so LOAD_WGT/LOAD_ACT (which sit behind
-    //   it in program order) must be picked first by the scanner.
+    // Test 2: out-of-order issue past a stalled instruction.
+    //   Programs have program-order semantics: an instruction consumes what
+    //   the instructions BEFORE it produced, and the window may only let a
+    //   younger instruction overtake an older, still-waiting one when they
+    //   share no buffer (see res_reads/res_writes in control_unit.sv).
     //
-    // UPDATED: this program never issues OP_VECTOR, so — under the new
-    // architecture — the tile MATMUL produces lands in accum_buffer (READY,
-    // single-pass ACC_NONE), not out_buf (out_buf is only touched by
-    // OP_VECTOR now).
+    //   Here VECTOR (slot 0 once MATMUL issues) must wait for the in-flight
+    //   MATMUL, while the younger LOAD_ACT into bank 1 is independent of it
+    //   and must be issued first, overlapping the array's work.
+    //
+    // UPDATED: previously this test listed MATMUL *before* its own
+    // LOAD_WGT/SWAP_WGT/LOAD_ACT and expected them to overtake it. That
+    // dataflow-style reordering also lets e.g. a STORE drain a bank before
+    // an older VECTOR wrote it, or a SWAP_WGT replace weights under an older
+    // MATMUL, so it is now (correctly) blocked.
     //-----------------------------------------------------------------
     task automatic test_out_of_order_issue();
         logic [INSTR_WIDTH-1:0] prog[];
-        $display("\n=== TEST 2: out-of-order issue past a stalled MATMUL ===");
+        int cyc, vector_issue_cyc, load_act1_issue_cyc;
+        $display("\n=== TEST 2: out-of-order issue past a stalled VECTOR ===");
+        reset_dut();
+        weight_addr = 64'hA000_0000;
+        src_addr    = 64'hB000_0000;
+        bias_addr   = 64'hB100_0000;
+
+        prog = '{
+            pack_instr(OP_LOAD_BIAS, 2'd0, 2'd0, 8'd0, 8'd1),
+            pack_instr(OP_LOAD_WGT,  2'd0, 2'd0, 8'd0, 8'd16),
+            pack_instr(OP_SWAP_WGT,  2'd0, 2'd0, 8'd0, 8'd0),
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16),            // -> bank0
+            pack_instr(OP_MATMUL,    2'd0, 2'd0, 8'd0, 8'd0, ACC_NONE),   // reads bank0
+            pack_instr(OP_VECTOR,    2'd0, 2'd0, 8'd0, 8'd0),             // waits for MATMUL
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd1, 8'd0, 8'd16),            // -> bank1: independent
+            pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
+        };
+        load_program(prog);
+        start_pulse <= 1; @(posedge clk); start_pulse <= 0;
+
+        vector_issue_cyc = -1;
+        load_act1_issue_cyc = -1;
+        for (cyc = 0; cyc < 400 && !done; cyc++) begin
+            @(negedge clk);
+            if (dut.issue_valid && dut.issue_packet.opcode == OP_VECTOR && vector_issue_cyc < 0)
+                vector_issue_cyc = cyc;
+            if (dut.issue_valid && dut.issue_packet.opcode == OP_LOAD_ACT && dut.issue_packet.dst == 2'd1
+                && load_act1_issue_cyc < 0)
+                load_act1_issue_cyc = cyc;
+        end
+        check(done, "design reached done within 400 cycles");
+        check(load_act1_issue_cyc >= 0 && vector_issue_cyc >= 0 && load_act1_issue_cyc < vector_issue_cyc,
+              "younger independent LOAD_ACT(bank1) issued before the stalled older VECTOR");
+        check(dut.act_buf_state[1] == dut.BUF_READY, "bank1 activations loaded");
+    endtask
+
+    //-----------------------------------------------------------------
+    // Test 7: OP_SET_BASE offsets DMA addresses and is not reordered.
+    //   LOAD_ACT #1 is stalled behind the weight DMA; the younger SET_BASE
+    //   (always issuable on its own) must not overtake it, so LOAD_ACT #1
+    //   reads at src_addr and LOAD_ACT #2 at src_addr + offset.
+    //-----------------------------------------------------------------
+    task automatic test_set_base_ordering();
+        logic [INSTR_WIDTH-1:0] prog[];
+        logic [63:0] act_addr0, act_addr1;
+        int cyc, n_act;
+        $display("\n=== TEST 7: OP_SET_BASE ordering and address offset ===");
         reset_dut();
         weight_addr = 64'hA000_0000;
         src_addr    = 64'hB000_0000;
 
         prog = '{
-            pack_instr(OP_MATMUL,   2'd0, 2'd0, 8'd0, 8'd0, ACC_NONE),   // stalled: no wgt/act yet
-            pack_instr(OP_LOAD_WGT, 2'd0, 2'd0, 8'd0, 8'd16),
-            pack_instr(OP_SWAP_WGT, 2'd0, 2'd0, 8'd0, 8'd0),  // NEW — required to set array_wgt_valid before MATMUL can issue
-            pack_instr(OP_LOAD_ACT, 2'd0, 2'd0, 8'd0, 8'd16),
-            pack_instr(OP_END,      2'd0, 2'd0, 8'd0, 8'd0)
+            pack_instr(OP_LOAD_WGT,  2'd0, 2'd0, 8'd0, 8'd16),
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd0, 8'd0, 8'd16),            // stalled: DMA busy
+            pack_instr(OP_SET_BASE,  2'd0, 2'd1, 8'h00, 8'h01),            // act base += 0x000100 beats (0x800 B)
+            pack_instr(OP_LOAD_ACT,  2'd0, 2'd1, 8'd0, 8'd16),
+            pack_instr(OP_END,       2'd0, 2'd0, 8'd0, 8'd0)
         };
         load_program(prog);
         start_pulse <= 1; @(posedge clk); start_pulse <= 0;
 
-        // Right after start, MATMUL sits at window slot 0 and must NOT be
-        // the one issued (its dependencies aren't ready).
-        @(negedge clk);
-        check(!(fifo_pop_en && fifo_pop_idx == 0),
-              "scheduler skips slot-0 MATMUL while its deps are not ready");
-
-        wait_done(300);
-        check(dut.accum_buf_state == dut.BUF_READY,
-              "MATMUL eventually issued and produced a ready accumulation-buffer tile");
+        n_act = 0;
+        act_addr0 = '0;
+        act_addr1 = '0;
+        for (cyc = 0; cyc < 400 && !done; cyc++) begin
+            @(negedge clk);
+            if (dut.dma_rd_start && dut.issue_packet.opcode == OP_LOAD_ACT) begin
+                if (n_act == 0) act_addr0 = dut.dma_rd_addr;
+                else            act_addr1 = dut.dma_rd_addr;
+                n_act++;
+            end
+        end
+        check(done, "design reached done within 400 cycles");
+        check(n_act == 2 && act_addr0 == 64'hB000_0000,
+              "LOAD_ACT before SET_BASE uses the unmodified src_addr");
+        check(n_act == 2 && act_addr1 == 64'hB000_0800,
+              "LOAD_ACT after SET_BASE uses src_addr + 0x100 beats");
     endtask
 
     //-----------------------------------------------------------------
@@ -608,6 +667,7 @@ module tb_control_unit;
         test_soft_reset();
         test_known_issue_second_weight_load();
         test_multi_tile_reduction();
+        test_set_base_ordering();
 
         $display("\n===========================================");
         $display(" RESULT: %0d passed, %0d failed", pass_cnt, fail_cnt);

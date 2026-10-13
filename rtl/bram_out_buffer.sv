@@ -69,9 +69,11 @@ module bram_out_buffer #(
                 rd_vec <= mem0[rd_mem_addr][rd_mem_offset * DMA_WIDTH +: DMA_WIDTH];
             else                
                 rd_vec <= mem1[rd_mem_addr][rd_mem_offset * DMA_WIDTH +: DMA_WIDTH];
-        end else begin
-            rd_vec <= '0; // Clean bus
         end
+        // No else: rd_vec holds its value between reads. axi4_master requires
+        // wr_data to stay stable until wr_data_ready, and control_unit
+        // prefetches each STORE beat a cycle (or more, for beat 0) before
+        // the W handshake; clearing the bus here sent zeros instead.
     end
 
     // Read valid pipeline

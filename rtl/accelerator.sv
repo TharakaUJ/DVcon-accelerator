@@ -4,7 +4,8 @@ module accelerator #(
     parameter int DATA_WIDTH = 8,
     parameter int ADDR_WIDTH = 64,
     parameter int INSTR_WINDOW_SIZE = 4,
-    parameter int SYSTOLIC_ARRAY_ROWS = 32
+    parameter int SYSTOLIC_ARRAY_ROWS = 32,
+    parameter int INSTR_DEPTH = 1024          // instruction memory entries (CPU-programmed)
 )(
     // axi master
     output logic m_axi_awvalid,
@@ -143,9 +144,9 @@ module accelerator #(
 
     // systolic array interface
     logic array_en, array_clear_acc, array_weight_load;
-    logic signed [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
-    logic signed [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
-    logic signed [31:0] array_result_out [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] systolic_array_act_in [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] systolic_array_weight_in [0:SYSTOLIC_ARRAY_ROWS*SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [31:0] array_result_out [0:SYSTOLIC_ARRAY_ROWS-1];
     logic [31:0] array_result_valid; // havent used yet
     logic [31:0] array_perf_cycles; // havent used yet
     logic array_perf_valid;
@@ -158,13 +159,13 @@ module accelerator #(
     localparam int ACC_W = 32;         // matches vector_unit's ACC_W localparam
     logic accum_wr_en, accum_wr_init, accum_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS)-1:0] accum_wr_addr, accum_rd_addr;
-    logic signed [ACC_W-1:0] accum_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [ACC_W-1:0] accum_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
     logic accum_rd_valid;
 
     // bram bias buffer interface (NEW)
     logic bias_wr_en, bias_rd_en;
     logic [$clog2(SYSTOLIC_ARRAY_ROWS*ACC_W/64)-1:0] bias_wr_addr;
-    logic signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [ACC_W-1:0] bias_rd_data [0:SYSTOLIC_ARRAY_ROWS-1];
     logic bias_rd_valid;
 
     // FIX — bias_addr is now a real, independently-settable AXI-lite
@@ -180,12 +181,12 @@ module accelerator #(
     logic [4:0] vector_requant_shift; // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
     logic [1:0] vector_act_type;      // FIX — now driven by axi4_lite_slave's REG_VEC_CTRL (was dangling)
     logic vector_out_valid; // havent used yet
-    logic signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
+    wire signed [DATA_WIDTH-1:0] vector_unit_out [0:SYSTOLIC_ARRAY_ROWS-1];
 
     // instruction fifo interface
     logic fifo_pop_en;
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] fifo_pop_idx;
-    logic [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
+    wire [INSTR_WIDTH-1:0] fifo_window [0:INSTR_WINDOW_SIZE-1];
 
     // control unit interface
     logic loading_weights, streaming_acts, weight_swap;
@@ -195,7 +196,34 @@ module accelerator #(
     logic [ADDR_WIDTH-1:0] cu_dma_rd_addr, cu_dma_wr_addr;
     logic [7:0] cu_dma_rd_len, cu_dma_wr_len;
 
-    
+    // NEW — CPU-programmable instruction memory write port (see
+    // RTL_INSTRUCTION_MEMORY_PROPOSAL.md). Sourced from axi4_lite_slave's
+    // REG_INSTR_ADDR/REG_INSTR_DATA/REG_PROG_LEN registers.
+    logic                              instr_wr_en_raw;   // ungated, straight from axi4_lite_slave
+    logic                              instr_wr_en;       // gated with !busy before reaching instruction_fifo_window
+    logic [$clog2(INSTR_DEPTH)-1:0]    instr_wr_addr;
+    logic [31:0]                       instr_wr_data;
+    logic [31:0]                       prog_len;          // REG_PROG_LEN: fetches at/after it read as OP_END
+
+    // NEW — hazard mitigation: gate the instruction-memory write port with
+    // !busy here in accelerator.sv (not inside axi4_lite_slave.sv). Rationale
+    // (see proposal doc section 6): `busy` is an accelerator-level signal
+    // that axi4_lite_slave already receives purely as a status input for
+    // REG_STATUS — it has no other use for scheduling decisions, so folding
+    // an additional gating responsibility into axi4_lite_slave would blur
+    // its role from "protocol + register file" into "hazard policy owner".
+    // accelerator.sv is where all cross-module hazard wiring already lives
+    // (e.g. the fifo_restart/start_pulse relationship below), so this is the
+    // single place a reader should look for "what stops a write from
+    // corrupting an in-flight program". While busy=1 (accel_state==ENG_BUSY
+    // per control_unit.sv), writes are silently dropped rather than stalled
+    // or queued — see proposal doc section 6 for why silent-drop was chosen
+    // over backpressure (AXI4-Lite has no ready-side mechanism to stall the
+    // CPU's write here; the register write itself always completes/BRESPs
+    // OKAY, only the resulting instr_wr_en pulse is suppressed).
+    assign instr_wr_en = instr_wr_en_raw && !busy;
+
+
     axi4_master u_axi4_master (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
@@ -256,7 +284,9 @@ module accelerator #(
 
 
 
-    axi4_lite_slave u_axi4_lite_slave (
+    axi4_lite_slave #(
+        .INSTR_DEPTH(INSTR_DEPTH)
+    ) u_axi4_lite_slave (
         .clk (s_axi_aclk),
         .rst_n (s_axi_aresetn),
 
@@ -294,6 +324,12 @@ module accelerator #(
         .vec_requant_mult (vector_requant_mult),  // FIX — closes the dangling-CSR gap
         .vec_requant_shift (vector_requant_shift),// FIX — closes the dangling-CSR gap
         .vec_act_type (vector_act_type),          // FIX — closes the dangling-CSR gap
+
+        // NEW — CPU instruction-memory programming interface
+        .instr_wr_en   (instr_wr_en_raw),
+        .instr_wr_addr (instr_wr_addr),
+        .instr_wr_data (instr_wr_data),
+        .prog_len      (prog_len),
 
         .busy (busy),
         .done (done),
@@ -533,7 +569,7 @@ module accelerator #(
 
     instruction_fifo_window #(
         .INSTR_WIDTH(INSTR_WIDTH),
-        .INSTR_DEPTH(16),
+        .INSTR_DEPTH(INSTR_DEPTH),
         .WINDOW_SIZE(INSTR_WINDOW_SIZE)
     ) u_instruction_fifo (
         .clk (s_axi_aclk),
@@ -541,7 +577,13 @@ module accelerator #(
         .pop_en (fifo_pop_en),
         .pop_idx (fifo_pop_idx),
         .window (fifo_window),
-        .restart (fifo_restart)        // NEW
+        .restart (fifo_restart),       // NEW
+
+        // NEW — CPU instruction-memory write port, gated with !busy above
+        .wr_en   (instr_wr_en),
+        .wr_addr (instr_wr_addr),
+        .wr_data (instr_wr_data),
+        .prog_len (prog_len)
     );
 
 endmodule

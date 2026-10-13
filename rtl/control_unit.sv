@@ -159,7 +159,8 @@ module control_unit #(
         OP_VECTOR,
         OP_STORE,
         OP_SWAP_WGT,
-        OP_END
+        OP_END,
+        OP_SET_BASE      // NEW — set a DMA base offset (see base_off below)
     } opcode_t;
 
     // NEW — per-OP_MATMUL control of how the array's tile result is combined
@@ -301,6 +302,20 @@ module control_unit #(
     logic          issue_valid;
     logic [$clog2(INSTR_WINDOW_SIZE)-1:0] issue_index;
     logic          already_selected;
+    logic [11:0]   older_reads, older_writes;   // resources touched by older, unissued window entries (RES_N bits)
+    logic          window_hazard;
+
+    // NEW — per-program DMA base offsets, set by OP_SET_BASE and added to the
+    // host's CSR base for every LOAD_*/STORE: address = CSR + base_off +
+    // (instr.addr << beat shift). Cleared on reset/soft_reset/start, so a
+    // program without SET_BASE addresses DRAM exactly as before.
+    //   OP_SET_BASE: dst selects the base, bits [23:0] (addr|length|
+    //   accum_ctrl|reserved) are the offset in DMA beats (DMA_WIDTH/8 bytes).
+    localparam int BASE_WGT  = 0;
+    localparam int BASE_ACT  = 1;
+    localparam int BASE_BIAS = 2;
+    localparam int BASE_OUT  = 3;
+    logic [DMA_WIDTH-1:0] base_off [0:3];
 
     // NEW — tracks whether the systolic array currently holds valid, swapped-in
     // weights, decoupled from wgt_buf_state (which only tracks the staging
@@ -311,6 +326,68 @@ module control_unit #(
     ///////////////////////////////////////////////////////////////////////////////
     // Dependency checker
     ///////////////////////////////////////////////////////////////////////////////
+    // In-window hazard check. The window issues out of order (first ready
+    // instruction wins), and the can_issue_* checks above only look at buffer
+    // states. That is not enough on its own: e.g. a STORE could drain out_buf
+    // while an older, still-waiting VECTOR has not written its row yet, or a
+    // SWAP_WGT could replace the array weights under an older MATMUL. So an
+    // instruction may only overtake older unissued instructions it shares no
+    // RAW / WAR / WAW resource with. Independent work (e.g. LOAD_ACT into the
+    // other bank, LOAD_WGT into staging during a MATMUL) still overlaps.
+    localparam int RES_WGT_STAGE = 0;
+    localparam int RES_ARRAY_WGT = 1;
+    localparam int RES_ACT0      = 2;   // RES_ACT0 + bank
+    localparam int RES_ACCUM     = 4;
+    localparam int RES_BIAS      = 5;
+    localparam int RES_OUT0      = 6;   // RES_OUT0 + bank
+    localparam int RES_BASE0     = 8;   // RES_BASE0 + BASE_* (DMA base offsets, see OP_SET_BASE)
+    localparam int RES_N         = 12;
+
+    function automatic logic [RES_N-1:0] res_reads(input instruction_t inst);
+        res_reads = '0;
+        case (inst.opcode)
+            OP_SWAP_WGT: res_reads[RES_WGT_STAGE] = 1'b1;
+            OP_MATMUL: begin
+                res_reads[RES_ACT0 + inst.src[0]] = 1'b1;
+                res_reads[RES_ARRAY_WGT]          = 1'b1;
+            end
+            OP_VECTOR: begin
+                res_reads[RES_ACCUM] = 1'b1;
+                res_reads[RES_BIAS]  = 1'b1;
+            end
+            OP_STORE: begin
+                res_reads[RES_OUT0 + inst.src[0]]  = 1'b1;
+                res_reads[RES_BASE0 + BASE_OUT]    = 1'b1;
+            end
+            OP_LOAD_WGT:  res_reads[RES_BASE0 + BASE_WGT]  = 1'b1;
+            OP_LOAD_ACT:  res_reads[RES_BASE0 + BASE_ACT]  = 1'b1;
+            OP_LOAD_BIAS: res_reads[RES_BASE0 + BASE_BIAS] = 1'b1;
+            OP_END:   res_reads = '1;   // nothing may be reordered around END
+            default: ;
+        endcase
+    endfunction
+
+    function automatic logic [RES_N-1:0] res_writes(input instruction_t inst);
+        res_writes = '0;
+        case (inst.opcode)
+            OP_LOAD_WGT:  res_writes[RES_WGT_STAGE]          = 1'b1;
+            OP_LOAD_ACT:  res_writes[RES_ACT0 + inst.dst[0]] = 1'b1;
+            OP_LOAD_BIAS: res_writes[RES_BIAS]               = 1'b1;
+            OP_SWAP_WGT: begin
+                res_writes[RES_ARRAY_WGT] = 1'b1;
+                res_writes[RES_WGT_STAGE] = 1'b1;   // staging buffer is consumed (-> EMPTY)
+            end
+            OP_MATMUL:    res_writes[RES_ACCUM]              = 1'b1;
+            OP_VECTOR: begin
+                res_writes[RES_OUT0 + inst.dst[0]] = 1'b1;
+                res_writes[RES_ACCUM]              = 1'b1;   // drains accum (-> EMPTY)
+            end
+            OP_SET_BASE:  res_writes[RES_BASE0 + inst.dst] = 1'b1;
+            OP_END:       res_writes = '1;
+            default: ;
+        endcase
+    endfunction
+
     function automatic logic can_issue_load_wgt;
         return
             dma_rd_state == ENG_IDLE &&
@@ -363,7 +440,11 @@ module control_unit #(
     );
         return
             dma_wr_state == ENG_IDLE &&
-            out_buf_state[src] == BUF_READY;
+            out_buf_state[src] == BUF_READY &&
+            // VECTOR leaves out_buf_state alone at issue, so a bank can be
+            // READY (from an earlier row) while a VECTOR is still writing
+            // another row into it; don't start draining until that lands.
+            !(vector_state == ENG_BUSY && vector_output_buf == src[0]);
     endfunction
 
     function automatic logic can_issue_swap_wgt;
@@ -412,6 +493,9 @@ module control_unit #(
         issue_valid = 1'b0;
         issue_index = '0;
         already_selected = 1'b0;
+        older_reads  = '0;
+        older_writes = '0;
+        window_hazard = 1'b0;
 
         fifo_pop_en  = 1'b0;
         fifo_pop_idx = '0;
@@ -478,8 +562,10 @@ module control_unit #(
             // Scan the instruction window and select the first ready instruction.
             for(i = 0; i < INSTR_WINDOW_SIZE; i = i + 1) begin
                 current_inst = decoded_window[i];
+                window_hazard = |((res_reads(current_inst) | res_writes(current_inst)) & older_writes) ||
+                                |(res_writes(current_inst) & older_reads);
 
-                if(!already_selected) begin
+                if(!already_selected && !window_hazard) begin
                     unique case(current_inst.opcode)
 
                         OP_NOP: begin
@@ -593,6 +679,20 @@ module control_unit #(
                                 already_selected = 1'b1;
                             end
 
+                        OP_SET_BASE: begin   // NEW — only updates base_off; ordering via res_*
+                            issue_packet.valid  = 1'b1;
+                            issue_packet.opcode = current_inst.opcode;
+                            issue_packet.src    = current_inst.src;
+                            issue_packet.dst    = current_inst.dst;
+                            issue_packet.addr   = current_inst.addr;
+                            issue_packet.length = current_inst.length;
+                            issue_packet.accum_ctrl = current_inst.accum_ctrl;
+                            issue_packet.reserved   = current_inst.reserved;
+                            issue_valid         = 1'b1;
+                            issue_index         = i;
+                            already_selected    = 1'b1;
+                        end
+
                        OP_END:
                             if (can_issue_end()) begin
                                 issue_packet.valid  = 1'b1;
@@ -611,6 +711,11 @@ module control_unit #(
                         end
 
                     endcase
+                end
+
+                if (!already_selected) begin
+                    older_reads  = older_reads  | res_reads(current_inst);
+                    older_writes = older_writes | res_writes(current_inst);
                 end
             end
         end
@@ -654,7 +759,7 @@ module control_unit #(
                     // row happens to be exactly one beat wide. At the
                     // default ARRAY_SIZE=32/DATA_WIDTH=8/DMA_WIDTH=64 (row=32B,
                     // beat=8B) the old formula was a 4x addressing error.
-                    dma_rd_addr  = weight_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
+                    dma_rd_addr  = weight_addr + base_off[BASE_WGT] + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_rd_len   = issue_packet.length; // beats-1, matches axi4_master's AxLEN convention directly
                 end
 
@@ -664,7 +769,7 @@ module control_unit #(
                     // FIX (was TODO) — same beat-vs-row correction as
                     // OP_LOAD_WGT above; confirmed against bram_act_buffer.sv
                     // (this addr field feeds act_wr_addr, stepped +1/beat).
-                    dma_rd_addr  = src_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
+                    dma_rd_addr  = src_addr + base_off[BASE_ACT] + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_rd_len   = issue_packet.length;
                 end
 
@@ -678,7 +783,7 @@ module control_unit #(
                     // bias_wr_addr, which — confirmed against
                     // bram_bias_buffer.sv — steps by one DMA BEAT
                     // (ELEMENTS_PER_DMA elements) per unit, not one element.
-                    dma_rd_addr  = bias_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
+                    dma_rd_addr  = bias_addr + base_off[BASE_BIAS] + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_rd_len   = issue_packet.length;
                 end
 
@@ -757,7 +862,7 @@ module control_unit #(
                     // beat-address space (RD_RATIO = OC_LANES/ELEMENTS_PER_DMA),
                     // and this addr field feeds out_rd_addr via
                     // st_base_addr/st_beat_cnt, already stepped +1/beat.
-                    dma_wr_addr  = dst_addr + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
+                    dma_wr_addr  = dst_addr + base_off[BASE_OUT] + (ADDR_WIDTH'(issue_packet.addr) << $clog2(DMA_WIDTH/8));
                     dma_wr_len   = issue_packet.length;
                 end
 
@@ -1202,6 +1307,18 @@ module control_unit #(
 
         end
 
+    end
+
+    // NEW — OP_SET_BASE: DMA base offsets (see base_off declaration).
+    always_ff @(posedge clk) begin
+        if (!rst_n || soft_reset || start_pulse) begin
+            for (int k = 0; k < 4; k++) base_off[k] <= '0;
+        end
+        else if (issue_packet.valid && issue_packet.opcode == OP_SET_BASE) begin
+            base_off[issue_packet.dst] <= DMA_WIDTH'({issue_packet.addr, issue_packet.length,
+                                                      issue_packet.accum_ctrl, issue_packet.reserved})
+                                          << $clog2(DMA_WIDTH/8);
+        end
     end
 
     always_ff @(posedge clk) begin
